@@ -87,6 +87,10 @@ public:
   double temperature_coupling;
   double qtb_f_max = 200.0; // in ps^-1
   int qtb_n_f = 100;
+  bool qtb_use_adaptive = false;
+  double qtb_adaptive_rate = 0.1;
+  double qtb_adaptive_window = -1.0;
+  std::vector<double> qtb_adaptive_rate_type;
   double tau_p;
   double elastic_modulus[6];
   double pressure_coupling[6];

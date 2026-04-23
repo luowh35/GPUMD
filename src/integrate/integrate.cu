@@ -108,7 +108,11 @@ void Integrate::initialize(
         temperature_coupling,
         time_step,
         qtb_f_max,
-        qtb_n_f));
+        qtb_n_f,
+        qtb_use_adaptive,
+        qtb_adaptive_rate,
+        qtb_adaptive_window,
+        qtb_adaptive_rate_type));
       break;
     case 11: // NPT-Berendsen
       ensemble.reset(new Ensemble_BER(
@@ -361,6 +365,10 @@ void Integrate::parse_ensemble(
 {
   qtb_f_max = 200.0;
   qtb_n_f = 100;
+  qtb_use_adaptive = false;
+  qtb_adaptive_rate = 0.1;
+  qtb_adaptive_window = -1.0;
+  qtb_adaptive_rate_type.assign(atom.cpu_type_size.size(), -1.0);
 
   // 1. Determine the integration method
   if (strcmp(param[1], "nve") == 0) {
@@ -395,9 +403,9 @@ void Integrate::parse_ensemble(
     }
   } else if (strcmp(param[1], "nvt_qtb") == 0) {
     type = 6;
-    if (num_param < 5 || num_param % 2 == 0) {
+    if (num_param < 5) {
       PRINT_INPUT_ERROR(
-        "ensemble nvt_qtb should have 3 required parameters plus optional key-value pairs.");
+        "ensemble nvt_qtb should have at least 3 parameters: <T1> <T2> <T_coup>.");
     }
   } else if (strcmp(param[1], "npt_ber") == 0) {
     type = 11;
@@ -542,6 +550,52 @@ void Integrate::parse_ensemble(
         if (qtb_n_f <= 0) {
           PRINT_INPUT_ERROR("N_f should > 0.");
         }
+      } else if (strcmp(param[i], "adaptive") == 0) {
+        int adaptive_flag = 0;
+        if (!is_valid_int(param[i + 1], &adaptive_flag)) {
+          PRINT_INPUT_ERROR("adaptive should be 0 or 1.");
+        }
+        if (adaptive_flag != 0 && adaptive_flag != 1) {
+          PRINT_INPUT_ERROR("adaptive should be 0 or 1.");
+        }
+        qtb_use_adaptive = (adaptive_flag == 1);
+      } else if (strcmp(param[i], "adapt_rate") == 0) {
+        if (!is_valid_real(param[i + 1], &qtb_adaptive_rate)) {
+          PRINT_INPUT_ERROR("adapt_rate should be a number.");
+        }
+        if (qtb_adaptive_rate < 0.0) {
+          PRINT_INPUT_ERROR("adapt_rate should be non-negative.");
+        }
+      } else if (strcmp(param[i], "adapt_window") == 0) {
+        if (!is_valid_real(param[i + 1], &qtb_adaptive_window)) {
+          PRINT_INPUT_ERROR("adapt_window should be a number.");
+        }
+        if (qtb_adaptive_window <= 0.0) {
+          PRINT_INPUT_ERROR("adapt_window should be positive.");
+        }
+      } else if (strcmp(param[i], "adapt_rate_type") == 0) {
+        int type_id = 0;
+        double type_rate = 0.0;
+        if (i + 2 >= num_param) {
+          PRINT_INPUT_ERROR("adapt_rate_type requires <type_id> <value>.");
+        }
+        if (!is_valid_int(param[i + 1], &type_id)) {
+          PRINT_INPUT_ERROR("adapt_rate_type requires an integer type_id.");
+        }
+        if (!is_valid_real(param[i + 2], &type_rate)) {
+          PRINT_INPUT_ERROR("adapt_rate_type requires a numeric value.");
+        }
+        if (type_rate <= 0.0) {
+          PRINT_INPUT_ERROR("adapt_rate_type value should be positive.");
+        }
+        if (type_id < 0) {
+          PRINT_INPUT_ERROR("adapt_rate_type type_id should >= 0.");
+        }
+        if (type_id >= int(qtb_adaptive_rate_type.size())) {
+          qtb_adaptive_rate_type.resize(type_id + 1, -1.0);
+        }
+        qtb_adaptive_rate_type[type_id] = type_rate;
+        i += 1;
       } else {
         PRINT_INPUT_ERROR("Unknown nvt_qtb optional keyword.");
       }
@@ -862,6 +916,24 @@ void Integrate::parse_ensemble(
       printf("    tau_T is %g time_step.\n", temperature_coupling);
       printf("    f_max is %g ps^-1.\n", qtb_f_max);
       printf("    N_f is %d.\n", qtb_n_f);
+      if (qtb_use_adaptive) {
+      printf("    adaptive QTB is enabled.\n");
+      printf("    adapt_rate is %g.\n", qtb_adaptive_rate);
+      if (qtb_adaptive_rate == 0.0) {
+        printf("    adapt_rate=0 enables diagnostic-only mode (gamma spectrum will not adapt).\n");
+      }
+      if (qtb_adaptive_window > 0.0) {
+        printf("    adapt_window is %g time_step.\n", qtb_adaptive_window);
+      }
+        for (int type_id = 0; type_id < int(qtb_adaptive_rate_type.size()); ++type_id) {
+          if (qtb_adaptive_rate_type[type_id] > 0.0) {
+            printf(
+              "    adapt_rate_type for atom type %d is %g.\n",
+              type_id,
+              qtb_adaptive_rate_type[type_id]);
+          }
+        }
+      }
       break;
     case 11:
       if (temperature_coupling <= 100000) {
