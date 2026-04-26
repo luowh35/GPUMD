@@ -35,6 +35,7 @@ void Dataset::copy_structures(std::vector<Structure>& structures_input, int n1, 
     structures[n].weight = structures_input[n_input].weight;
     structures[n].has_virial = structures_input[n_input].has_virial;
     structures[n].has_bec = structures_input[n_input].has_bec;
+    structures[n].has_dipole = structures_input[n_input].has_dipole;
     structures[n].has_atomic_virial = structures_input[n_input].has_atomic_virial;
     structures[n].atomic_virial_diag_only = structures_input[n_input].atomic_virial_diag_only;
     structures[n].charge = structures_input[n_input].charge;
@@ -54,6 +55,7 @@ void Dataset::copy_structures(std::vector<Structure>& structures_input, int n1, 
     }
     for (int k = 0; k < 3; ++k) {
       structures[n].num_cell[k] = structures_input[n_input].num_cell[k];
+      structures[n].dipole[k] = structures_input[n_input].dipole[k];
     }
 
     structures[n].type.resize(structures[n].num_atom);
@@ -173,6 +175,12 @@ void Dataset::initialize_gpu_data(Parameters& para)
     bec_cpu.resize(N * 9);
     bec_ref_cpu.resize(N * 9);
     bec_ref_gpu.resize(N * 9);
+    if (para.has_dipole) {
+      dipole_ref_cpu.resize(Nc * 3);
+      dipole_ref_gpu.resize(Nc * 3);
+      has_dipole_cpu.resize(Nc);
+      has_dipole_gpu.resize(Nc);
+    }
   }
 
   energy.resize(N);
@@ -195,6 +203,12 @@ void Dataset::initialize_gpu_data(Parameters& para)
     weight_cpu[n] = structures[n].weight;
     if (para.charge_mode) {
       charge_ref_cpu[n] = structures[n].charge;
+      if (para.has_dipole) {
+        has_dipole_cpu[n] = structures[n].has_dipole ? 1 : 0;
+        for (int d = 0; d < 3; ++d) {
+          dipole_ref_cpu[n * 3 + d] = structures[n].dipole[d];
+        }
+      }
     }
     energy_ref_cpu[n] = structures[n].energy;
     energy_weight_cpu[n] = structures[n].energy_weight;
@@ -251,6 +265,10 @@ void Dataset::initialize_gpu_data(Parameters& para)
   if (para.charge_mode) {
     charge_ref_gpu.copy_from_host(charge_ref_cpu.data());
     bec_ref_gpu.copy_from_host(bec_ref_cpu.data());
+    if (para.has_dipole) {
+      dipole_ref_gpu.copy_from_host(dipole_ref_cpu.data());
+      has_dipole_gpu.copy_from_host(has_dipole_cpu.data());
+    }
   }
   energy_ref_gpu.copy_from_host(energy_ref_cpu.data());
   energy_weight_gpu.copy_from_host(energy_weight_cpu.data());
@@ -901,8 +919,69 @@ std::vector<float> Dataset::get_rmse_virial(Parameters& para, const bool use_wei
   return rmse_array;
 }
 
+// Computes per-structure dipole error: Σ_d ((Σ_i q_i * r_i_d - (1+chi)*dipole_ref_d) / Na)^2
+static __global__ void gpu_sum_dipole_error(
+  int* g_Na,
+  int* g_Na_sum,
+  int* g_has_dipole,
+  float* g_charge,      // charge_shifted
+  float* g_x,
+  float* g_y,
+  float* g_z,
+  float* g_dipole_ref,  // (Nc * 3)
+  float chi,
+  float* error_gpu)
+{
+  const int tid = threadIdx.x;
+  const int bid = blockIdx.x;
+  if (!g_has_dipole[bid]) {
+    if (tid == 0) {
+      error_gpu[bid] = 0.0f;
+    }
+    return;
+  }
+
+  const int Na = g_Na[bid];
+  const int N1 = g_Na_sum[bid];
+  const int N2 = N1 + Na;
+  extern __shared__ float s_dipole[];
+  float* s_dx = s_dipole;
+  float* s_dy = s_dipole + blockDim.x;
+  float* s_dz = s_dipole + blockDim.x * 2;
+  s_dx[tid] = 0.0f;
+  s_dy[tid] = 0.0f;
+  s_dz[tid] = 0.0f;
+
+  for (int n = N1 + tid; n < N2; n += blockDim.x) {
+    const float q = g_charge[n];
+    s_dx[tid] += q * g_x[n];
+    s_dy[tid] += q * g_y[n];
+    s_dz[tid] += q * g_z[n];
+  }
+  __syncthreads();
+
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      s_dx[tid] += s_dx[tid + offset];
+      s_dy[tid] += s_dy[tid + offset];
+      s_dz[tid] += s_dz[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    const float target_x = (1.0f + chi) * g_dipole_ref[bid * 3 + 0];
+    const float target_y = (1.0f + chi) * g_dipole_ref[bid * 3 + 1];
+    const float target_z = (1.0f + chi) * g_dipole_ref[bid * 3 + 2];
+    const float dx = (s_dx[0] - target_x) / Na;
+    const float dy = (s_dy[0] - target_y) / Na;
+    const float dz = (s_dz[0] - target_z) / Na;
+    error_gpu[bid] = dx * dx + dy * dy + dz * dz;
+  }
+}
+
 static __global__ void gpu_sum_charge_error(
-  int* g_Na, 
+  int* g_Na,
   int* g_Na_sum, 
   float* g_charge, 
   float* g_charge_ref,  
@@ -998,6 +1077,53 @@ std::vector<float> Dataset::get_rmse_charge(Parameters& para, int device_id)
       if (has_type[t * Nc + n]) {
         rmse_array[t] += rmse_temp;
         count_array[t] += 1;
+      }
+    }
+  }
+
+  for (int t = 0; t <= para.num_types; ++t) {
+    if (count_array[t] > 0) {
+      rmse_array[t] = sqrt(rmse_array[t] / count_array[t]);
+    }
+  }
+  return rmse_array;
+}
+
+std::vector<float> Dataset::get_rmse_dipole(Parameters& para, int device_id)
+{
+  std::vector<float> rmse_array(para.num_types + 1, 0.0f);
+  if (!(para.charge_mode && para.has_dipole)) {
+    return rmse_array;
+  }
+
+  CHECK(gpuSetDevice(device_id));
+
+  std::vector<int> count_array(para.num_types + 1, 0);
+
+  int mem = sizeof(float) * Nc;
+  const int block_size = 256;
+
+  gpu_sum_dipole_error<<<Nc, block_size, sizeof(float) * block_size * 3>>>(
+    Na.data(),
+    Na_sum.data(),
+    has_dipole_gpu.data(),
+    charge_shifted.data(),
+    r.data(),
+    r.data() + N,
+    r.data() + N * 2,
+    dipole_ref_gpu.data(),
+    para.chi,
+    error_gpu.data());
+  CHECK(gpuMemcpy(error_cpu.data(), error_gpu.data(), mem, gpuMemcpyDeviceToHost));
+
+  for (int n = 0; n < Nc; ++n) {
+    if (structures[n].has_dipole) {
+      const float rmse_temp = error_cpu[n];
+      for (int t = 0; t < para.num_types + 1; ++t) {
+        if (has_type[t * Nc + n]) {
+          rmse_array[t] += rmse_temp;
+          count_array[t] += 3;
+        }
       }
     }
   }

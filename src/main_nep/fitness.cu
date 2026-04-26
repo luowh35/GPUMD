@@ -156,7 +156,8 @@ void Fitness::compute(
   float* fitness_force,
   float* fitness_virial,
   float* fitness_charge,
-  float* fitness_bec)
+  float* fitness_bec,
+  float* fitness_dipole)
 {
   int deviceCount;
   CHECK(gpuGetDeviceCount(&deviceCount));
@@ -188,6 +189,7 @@ void Fitness::compute(
         auto rmse_virial_array = train_set[batch_id][m].get_rmse_virial(para, true, m);
         auto rmse_charge_array = train_set[batch_id][m].get_rmse_charge(para, m);
         auto rmse_bec_array = train_set[batch_id][m].get_rmse_bec(para, m);
+        auto rmse_dipole_array = train_set[batch_id][m].get_rmse_dipole(para, m);
 
         for (int t = 0; t <= para.num_types; ++t) {
           fitness_energy[deviceCount * n + m + t * para.population_size] =
@@ -200,6 +202,8 @@ void Fitness::compute(
             para.lambda_q * rmse_charge_array[t];
           fitness_bec[deviceCount * n + m + t * para.population_size] =
             para.lambda_z * rmse_bec_array[t];
+          fitness_dipole[deviceCount * n + m + t * para.population_size] =
+            para.lambda_d * rmse_dipole_array[t];
         }
       }
     }
@@ -223,6 +227,7 @@ void Fitness::compute(
             auto rmse_virial_array = train_set[batch_id][m].get_rmse_virial(para, true, m);
             auto rmse_charge_array = train_set[batch_id][m].get_rmse_charge(para, m);
             auto rmse_bec_array = train_set[batch_id][m].get_rmse_bec(para, m);
+            auto rmse_dipole_array = train_set[batch_id][m].get_rmse_dipole(para, m);
             for (int t = 0; t <= para.num_types; ++t) {
               // energy
               float old_value = fitness_energy[deviceCount * n + m + t * para.population_size];
@@ -254,6 +259,12 @@ void Fitness::compute(
               new_value = old_value * old_value * count_batch + new_value * new_value;
               new_value = sqrt(new_value / (count_batch + 1));
               fitness_bec[deviceCount * n + m + t * para.population_size] = new_value;
+              // dipole
+              old_value = fitness_dipole[deviceCount * n + m + t * para.population_size];
+              new_value = para.lambda_d * rmse_dipole_array[t];
+              new_value = old_value * old_value * count_batch + new_value * new_value;
+              new_value = sqrt(new_value / (count_batch + 1));
+              fitness_dipole[deviceCount * n + m + t * para.population_size] = new_value;
             }
           }
         }
@@ -455,12 +466,14 @@ void Fitness::report_error(
     auto rmse_virial_train_array = train_set[batch_id][0].get_rmse_virial(para, false, 0);
     auto rmse_charge_train_array = train_set[batch_id][0].get_rmse_charge(para, 0);
     auto rmse_bec_train_array = train_set[batch_id][0].get_rmse_bec(para, 0);
+    auto rmse_dipole_train_array = train_set[batch_id][0].get_rmse_dipole(para, 0);
 
     float rmse_energy_train = rmse_energy_train_array.back();
     float rmse_force_train = rmse_force_train_array.back();
     float rmse_virial_train = rmse_virial_train_array.back();
     float rmse_charge_train = rmse_charge_train_array.back();
     float rmse_bec_train = rmse_bec_train_array.back();
+    float rmse_dipole_train = rmse_dipole_train_array.back();
 
     // correct the last bias parameter in the NN
     if (para.train_mode == 0 || para.train_mode == 3) {
@@ -472,6 +485,7 @@ void Fitness::report_error(
     float rmse_virial_test = 0.0f;
     float rmse_charge_test = 0.0f;
     float rmse_bec_test = 0.0f;
+    float rmse_dipole_test = 0.0f;
     if (has_test_set) {
       potential->find_force(para, elite, test_set, false, true, 1);
       float energy_shift_per_structure_not_used;
@@ -481,11 +495,13 @@ void Fitness::report_error(
       auto rmse_virial_test_array = test_set[0].get_rmse_virial(para, false, 0);
       auto rmse_charge_test_array = test_set[0].get_rmse_charge(para, 0);
       auto rmse_bec_test_array = test_set[0].get_rmse_bec(para, 0);
+      auto rmse_dipole_test_array = test_set[0].get_rmse_dipole(para, 0);
       rmse_energy_test = rmse_energy_test_array.back();
       rmse_force_test = rmse_force_test_array.back();
       rmse_virial_test = rmse_virial_test_array.back();
       rmse_charge_test = rmse_charge_test_array.back();
       rmse_bec_test = rmse_bec_test_array.back();
+      rmse_dipole_test = rmse_dipole_test_array.back();
     }
 
     FILE* fid_nep = my_fopen("nep.txt", "w");
@@ -533,7 +549,7 @@ void Fitness::report_error(
       } else {
         // qNEP models:
         printf(
-          "%-8d%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f\n",
+          "%-8d%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f\n",
           generation + 1,
           loss_total,
           loss_L1,
@@ -543,14 +559,16 @@ void Fitness::report_error(
           rmse_virial_train,
           rmse_charge_train,
           rmse_bec_train,
+          rmse_dipole_train,
           rmse_energy_test,
           rmse_force_test,
           rmse_virial_test,
           rmse_charge_test,
-          rmse_bec_test);
+          rmse_bec_test,
+          rmse_dipole_test);
         fprintf(
           fid_loss_out,
-          "%-8d%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f\n",
+          "%-8d%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f%-9.5f\n",
           generation + 1,
           loss_total,
           loss_L1,
@@ -560,11 +578,13 @@ void Fitness::report_error(
           rmse_virial_train,
           rmse_charge_train,
           rmse_bec_train,
+          rmse_dipole_train,
           rmse_energy_test,
           rmse_force_test,
           rmse_virial_test,
           rmse_charge_test,
-          rmse_bec_test);
+          rmse_bec_test,
+          rmse_dipole_test);
       }
     } else {
       // TNEP models:

@@ -55,6 +55,8 @@ public:
 
   GPU_Vector<float> energy_weight_gpu;    // energy weight in GPU
   GPU_Vector<float> charge_ref_gpu;       // reference charge in GPU
+  GPU_Vector<float> dipole_ref_gpu;       // reference dipole moment in GPU (Nc * 3)
+  GPU_Vector<int> has_dipole_gpu;         // whether each structure has dipole data
   GPU_Vector<float> energy_ref_gpu;       // reference energy in GPU
   GPU_Vector<float> virial_ref_gpu;       // reference virial in GPU
   GPU_Vector<float> force_ref_gpu;        // reference force in GPU
@@ -63,6 +65,8 @@ public:
   GPU_Vector<float> temperature_ref_gpu;  // reference temperature in GPU
   std::vector<float> energy_weight_cpu;   // energy weight in CPU
   std::vector<float> charge_ref_cpu;      // reference charge in CPU
+  std::vector<float> dipole_ref_cpu;      // reference dipole moment in CPU (Nc * 3)
+  std::vector<int> has_dipole_cpu;        // whether each structure has dipole data
   std::vector<float> energy_ref_cpu;      // reference energy in CPU
   std::vector<float> virial_ref_cpu;      // reference virial in CPU
   std::vector<float> force_ref_cpu;       // reference force in CPU
@@ -92,6 +96,7 @@ public:
   std::vector<float> get_rmse_virial(Parameters& para, const bool use_weight, int device_id);
   std::vector<float> get_rmse_avirial(Parameters& para, const bool use_weight, int device_id);
   std::vector<float> get_rmse_charge(Parameters& para, int device_id);
+  std::vector<float> get_rmse_dipole(Parameters& para, int device_id);
   std::vector<float> get_rmse_bec(Parameters& para, int device_id);
 
 private:

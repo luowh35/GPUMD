@@ -1283,39 +1283,224 @@ static __global__ void find_k_and_G(
   }
 }
 
-static __global__ void zero_total_charge(
+static __device__ bool solve_symmetric_3x3(
+  const float cxx,
+  const float cxy,
+  const float cxz,
+  const float cyy,
+  const float cyz,
+  const float czz,
+  const float bx,
+  const float by,
+  const float bz,
+  float& ax,
+  float& ay,
+  float& az)
+{
+  const float det = cxx * (cyy * czz - cyz * cyz) -
+                    cxy * (cxy * czz - cxz * cyz) +
+                    cxz * (cxy * cyz - cxz * cyy);
+  if (fabsf(det) < 1.0e-12f) {
+    ax = ay = az = 0.0f;
+    return false;
+  }
+
+  const float inv00 = (cyy * czz - cyz * cyz) / det;
+  const float inv01 = (cxz * cyz - cxy * czz) / det;
+  const float inv02 = (cxy * cyz - cxz * cyy) / det;
+  const float inv11 = (cxx * czz - cxz * cxz) / det;
+  const float inv12 = (cxy * cxz - cxx * cyz) / det;
+  const float inv22 = (cxx * cyy - cxy * cxy) / det;
+
+  ax = inv00 * bx + inv01 * by + inv02 * bz;
+  ay = inv01 * bx + inv11 * by + inv12 * bz;
+  az = inv02 * bx + inv12 * by + inv22 * bz;
+  return true;
+}
+
+static __global__ void constrain_charge_and_dipole(
   const int* Na,
   const int* Na_sum,
   const float* g_charge_ref,
+  const float* g_dipole_ref,
+  const int* g_has_dipole,
+  const bool has_dipole,
+  const float chi,
+  const float* g_x,
+  const float* g_y,
+  const float* g_z,
   const float* g_charge,
   float* g_charge_shifted)
 {
-  int tid = threadIdx.x;
-  int N1 = Na_sum[blockIdx.x];
-  int N2 = N1 + Na[blockIdx.x];
-  int number_of_batches = (N2 - N1 - 1) / 1024 + 1;
-  __shared__ float s_charge[1024];
+  const int tid = threadIdx.x;
+  const int bid = blockIdx.x;
+  const int Na_local = Na[bid];
+  const int N1 = Na_sum[bid];
+  const int N2 = N1 + Na_local;
+  const int number_of_batches = (N2 - N1 - 1) / blockDim.x + 1;
+  extern __shared__ float s[];
+  float* s0 = s;
+  float* s1 = s0 + blockDim.x;
+  float* s2 = s1 + blockDim.x;
+  float* s3 = s2 + blockDim.x;
+  float* s4 = s3 + blockDim.x;
+  float* s5 = s4 + blockDim.x;
+
   float charge = 0.0f;
   for (int batch = 0; batch < number_of_batches; ++batch) {
-    int n = tid + batch * 1024 + N1;
+    const int n = tid + batch * blockDim.x + N1;
     if (n < N2) {
       charge += g_charge[n];
     }
   }
-  s_charge[tid] = charge;
+  s0[tid] = charge;
   __syncthreads();
 
   for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
     if (tid < offset) {
-      s_charge[tid] += s_charge[tid + offset];
+      s0[tid] += s0[tid + offset];
     }
     __syncthreads();
   }
 
+  const float charge_shift = (g_charge_ref[bid] - s0[0]) / Na_local;
   for (int batch = 0; batch < number_of_batches; ++batch) {
-    int n = tid + batch * 1024 + N1;
+    const int n = tid + batch * blockDim.x + N1;
     if (n < N2) {
-      g_charge_shifted[n] = g_charge[n] + (g_charge_ref[blockIdx.x] - s_charge[0]) / (N2 - N1);
+      g_charge_shifted[n] = g_charge[n] + charge_shift;
+    }
+  }
+  __syncthreads();
+
+  if (!has_dipole || !g_has_dipole[bid]) {
+    return;
+  }
+
+  float sx = 0.0f;
+  float sy = 0.0f;
+  float sz = 0.0f;
+  float mux = 0.0f;
+  float muy = 0.0f;
+  float muz = 0.0f;
+  for (int batch = 0; batch < number_of_batches; ++batch) {
+    const int n = tid + batch * blockDim.x + N1;
+    if (n < N2) {
+      const float q = g_charge_shifted[n];
+      sx += g_x[n];
+      sy += g_y[n];
+      sz += g_z[n];
+      mux += q * g_x[n];
+      muy += q * g_y[n];
+      muz += q * g_z[n];
+    }
+  }
+  s0[tid] = sx;
+  s1[tid] = sy;
+  s2[tid] = sz;
+  s3[tid] = mux;
+  s4[tid] = muy;
+  s5[tid] = muz;
+  __syncthreads();
+
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      s0[tid] += s0[tid + offset];
+      s1[tid] += s1[tid + offset];
+      s2[tid] += s2[tid + offset];
+      s3[tid] += s3[tid + offset];
+      s4[tid] += s4[tid + offset];
+      s5[tid] += s5[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    const float one_plus_chi = 1.0f + chi;
+    const float rx_mean = s0[0] / Na_local;
+    const float ry_mean = s1[0] / Na_local;
+    const float rz_mean = s2[0] / Na_local;
+    const float dx = one_plus_chi * g_dipole_ref[bid * 3 + 0] - s3[0];
+    const float dy = one_plus_chi * g_dipole_ref[bid * 3 + 1] - s4[0];
+    const float dz = one_plus_chi * g_dipole_ref[bid * 3 + 2] - s5[0];
+    s0[0] = rx_mean;
+    s1[0] = ry_mean;
+    s2[0] = rz_mean;
+    s3[0] = dx;
+    s4[0] = dy;
+    s5[0] = dz;
+  }
+  __syncthreads();
+
+  const float rx_mean = s0[0];
+  const float ry_mean = s1[0];
+  const float rz_mean = s2[0];
+  const float dx = s3[0];
+  const float dy = s4[0];
+  const float dz = s5[0];
+
+  float cxx = 0.0f;
+  float cxy = 0.0f;
+  float cxz = 0.0f;
+  float cyy = 0.0f;
+  float cyz = 0.0f;
+  float czz = 0.0f;
+  for (int batch = 0; batch < number_of_batches; ++batch) {
+    const int n = tid + batch * blockDim.x + N1;
+    if (n < N2) {
+      const float x = g_x[n] - rx_mean;
+      const float y = g_y[n] - ry_mean;
+      const float z = g_z[n] - rz_mean;
+      cxx += x * x;
+      cxy += x * y;
+      cxz += x * z;
+      cyy += y * y;
+      cyz += y * z;
+      czz += z * z;
+    }
+  }
+  s0[tid] = cxx;
+  s1[tid] = cxy;
+  s2[tid] = cxz;
+  s3[tid] = cyy;
+  s4[tid] = cyz;
+  s5[tid] = czz;
+  __syncthreads();
+
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      s0[tid] += s0[tid + offset];
+      s1[tid] += s1[tid + offset];
+      s2[tid] += s2[tid + offset];
+      s3[tid] += s3[tid + offset];
+      s4[tid] += s4[tid + offset];
+      s5[tid] += s5[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    float ax = 0.0f;
+    float ay = 0.0f;
+    float az = 0.0f;
+    if (!solve_symmetric_3x3(s0[0], s1[0], s2[0], s3[0], s4[0], s5[0], dx, dy, dz, ax, ay, az)) {
+      ax = (s0[0] > 1.0e-12f) ? dx / s0[0] : 0.0f;
+      ay = (s3[0] > 1.0e-12f) ? dy / s3[0] : 0.0f;
+      az = (s5[0] > 1.0e-12f) ? dz / s5[0] : 0.0f;
+    }
+    s0[0] = ax;
+    s1[0] = ay;
+    s2[0] = az;
+  }
+  __syncthreads();
+
+  const float ax = s0[0];
+  const float ay = s1[0];
+  const float az = s2[0];
+  for (int batch = 0; batch < number_of_batches; ++batch) {
+    const int n = tid + batch * blockDim.x + N1;
+    if (n < N2) {
+      g_charge_shifted[n] +=
+        ax * (g_x[n] - rx_mean) + ay * (g_y[n] - ry_mean) + az * (g_z[n] - rz_mean);
     }
   }
 }
@@ -1470,11 +1655,18 @@ void NEP_Charge::find_force(
     }
     GPU_CHECK_KERNEL
 
-    // enforce total charge is the target
-    zero_total_charge<<<dataset[device_id].Nc, 1024>>>(
+    constrain_charge_and_dipole<<<
+      dataset[device_id].Nc, 1024, sizeof(float) * 1024 * 6>>>(
       dataset[device_id].Na.data(),
       dataset[device_id].Na_sum.data(),
       dataset[device_id].charge_ref_gpu.data(),
+      para.has_dipole ? dataset[device_id].dipole_ref_gpu.data() : nullptr,
+      para.has_dipole ? dataset[device_id].has_dipole_gpu.data() : nullptr,
+      para.has_dipole,
+      para.chi,
+      dataset[device_id].r.data(),
+      dataset[device_id].r.data() + dataset[device_id].N,
+      dataset[device_id].r.data() + dataset[device_id].N * 2,
       dataset[device_id].charge.data(),
       dataset[device_id].charge_shifted.data());
     GPU_CHECK_KERNEL

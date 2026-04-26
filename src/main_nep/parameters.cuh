@@ -51,6 +51,8 @@ public:
   float lambda_shear;     // extra weight parameter for shear virial
   float lambda_q;         // weight for global charge
   float lambda_z;         // weight for BEC
+  float lambda_d;         // weight for dipole moment RMSE loss
+  float chi;              // electronic susceptibility (epsilon_inf - 1)
   float force_delta;      // a parameters used to modify the force loss
   bool enable_zbl;        // true for inlcuding the universal ZBL potential
   bool flexible_zbl;      // true for inlcuding the flexible ZBL potential
@@ -66,6 +68,7 @@ public:
   int output_descriptor;
   int charge_mode; // add dynamic charge to NEP potential model
   bool has_bec = false; // check if there are target BEC values
+  bool has_dipole = false; // check if there are target dipole values
   int flip_charge = 0; // 1 for flipping charges upon restarting
   int fine_tune = 0; // fine_tune option; 0=no, 1=yes
   int fine_tune_descriptor = 1; // fine-tune descriptor; 0=no, 1=yes
@@ -98,6 +101,8 @@ public:
   bool is_zbl_set;
   bool is_use_typewise_cutoff_zbl_set;
   bool is_charge_mode_set;
+  bool is_lambda_d_set;
+  bool is_chi_set;
 
   // other parameters
   int dim;                            // dimension of the descriptor vector
@@ -151,6 +156,8 @@ private:
   void parse_lambda_v(const char** param, int num_param);
   void parse_lambda_q(const char** param, int num_param);
   void parse_lambda_z(const char** param, int num_param);
+  void parse_lambda_d(const char** param, int num_param);
+  void parse_chi(const char** param, int num_param);
   void parse_lambda_shear(const char** param, int num_param);
   void parse_force_delta(const char** param, int num_param);
   void parse_batch(const char** param, int num_param);
