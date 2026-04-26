@@ -49,6 +49,8 @@ struct Structure {
   std::vector<float> avirialyz;
   std::vector<float> avirialzx;
   std::vector<float> bec;
+  float dipole[3] = {0.0f, 0.0f, 0.0f};
+  bool has_dipole = false;
 };
 
 bool read_structures(bool is_train, Parameters& para, std::vector<Structure>& structures);

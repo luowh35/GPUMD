@@ -45,6 +45,42 @@ static float get_det(const float* box)
          box[2] * (box[3] * box[7] - box[4] * box[6]);
 }
 
+static bool parse_vector3_property(
+  const std::vector<std::string>& tokens,
+  const int token_index,
+  const std::string& key,
+  const char* filename,
+  const int line_number,
+  float values[3])
+{
+  if (tokens[token_index].substr(0, key.length()) != key) {
+    return false;
+  }
+
+  std::string content = tokens[token_index].substr(key.length());
+  for (int offset = 1; offset < 3 && token_index + offset < tokens.size(); ++offset) {
+    content += " ";
+    content += tokens[token_index + offset];
+    if (tokens[token_index + offset].find('"') != std::string::npos) {
+      break;
+    }
+  }
+
+  content.erase(std::remove(content.begin(), content.end(), '"'), content.end());
+  std::replace(content.begin(), content.end(), ';', ' ');
+  std::replace(content.begin(), content.end(), ',', ' ');
+
+  std::istringstream iss(content);
+  std::string component;
+  for (int d = 0; d < 3; ++d) {
+    if (!(iss >> component)) {
+      PRINT_INPUT_ERROR("Failed to parse a 3-component vector property.");
+    }
+    values[d] = get_double_from_token(component, filename, line_number);
+  }
+  return true;
+}
+
 static void change_box(const Parameters& para, Structure& structure)
 {
   float a[3] = {structure.box_original[0], structure.box_original[3], structure.box_original[6]};
@@ -233,6 +269,18 @@ static void read_one_structure(
     }
   }
 
+  // get dipole moment (optional; 3 components separated by semicolons)
+  structure.has_dipole = false;
+  for (int n = 0; n < tokens.size(); ++n) {
+    const std::string dipole_string = "dipole=";
+    if (parse_vector3_property(
+          tokens, n, dipole_string, xyz_filename.c_str(), line_number, structure.dipole)) {
+      structure.has_dipole = true;
+      para.has_dipole = true;
+      break;
+    }
+  }
+
   structure.has_temperature = false;
   for (const auto& token : tokens) {
     const std::string temperature_string = "temperature=";
@@ -350,23 +398,13 @@ static void read_one_structure(
 
   // use the virial viriable to keep the dipole data
   if (para.train_mode == 1) {
-    structure.has_virial = false;
-    for (int n = 0; n < tokens.size(); ++n) {
-      const std::string dipole_string = "dipole=";
-      if (tokens[n].substr(0, dipole_string.length()) == dipole_string) {
-        structure.has_virial = true;
-        for (int m = 0; m < 6; ++m) {
-          structure.virial[m] = 0.0f;
-        }
-        for (int m = 0; m < 3; ++m) {
-          structure.virial[m] = get_double_from_token(
-            tokens[n + m].substr(
-              (m == 0) ? (dipole_string.length() + 1) : 0,
-              (m == 2) ? (tokens[n + m].length() - 1) : tokens[n + m].length()),
-            xyz_filename.c_str(),
-            line_number);
-          structure.virial[m] /= structure.num_atom;
-        }
+    structure.has_virial = structure.has_dipole;
+    if (structure.has_dipole) {
+      for (int m = 0; m < 6; ++m) {
+        structure.virial[m] = 0.0f;
+      }
+      for (int m = 0; m < 3; ++m) {
+        structure.virial[m] = structure.dipole[m] / structure.num_atom;
       }
     }
     if (!structure.has_virial) {

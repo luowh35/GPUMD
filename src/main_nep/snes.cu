@@ -60,6 +60,7 @@ SNES::SNES(Parameters& para, Fitness* fitness_function)
   fitness_virial.resize(population_size * (para.num_types + 1));
   fitness_charge.resize(population_size * (para.num_types + 1));
   fitness_bec.resize(population_size * (para.num_types + 1));
+  fitness_dipole.resize(population_size * (para.num_types + 1));
   index.resize(population_size * (para.num_types + 1));
   population.resize(N);
   mu.resize(number_of_variables);
@@ -333,7 +334,7 @@ void SNES::compute(Parameters& para, Fitness* fitness_function)
           "RMSE-V-Test");
       } else {
         printf(
-          "%-8s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s\n",
+          "%-8s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s%-9s\n",
           "Step",
           "Total",
           "L1Reg",
@@ -343,11 +344,13 @@ void SNES::compute(Parameters& para, Fitness* fitness_function)
           "V-Train",
           "Q-Train",
           "Z-Train",
+          "D-Train",
           "E-Test",
           "F-Test",
           "V-Test",
           "Q-Test",
-          "Z-Test");
+          "Z-Test",
+          "D-Test");
       }
     } else {
       printf(
@@ -372,7 +375,8 @@ void SNES::compute(Parameters& para, Fitness* fitness_function)
         fitness_force.data(),
         fitness_virial.data(),
         fitness_charge.data(),
-        fitness_bec.data());
+        fitness_bec.data(),
+        fitness_dipole.data());
 
       if (para.version != 3) {
         regularize_NEP4(para);
@@ -543,7 +547,8 @@ void SNES::regularize_NEP4(Parameters& para)
       fitness_total[p + t * population_size] =
         cost_L1 + cost_L2 + fitness_energy[p + t * population_size] +
         fitness_force[p + t * population_size] + fitness_virial[p + t * population_size] +
-        fitness_charge[p + t * population_size] + fitness_bec[p + t * population_size];
+        fitness_charge[p + t * population_size] + fitness_bec[p + t * population_size] +
+        fitness_dipole[p + t * population_size];
       fitness_L1[p + t * population_size] = cost_L1;
       fitness_L2[p + t * population_size] = cost_L2;
     }
@@ -600,7 +605,8 @@ void SNES::regularize(Parameters& para)
       fitness_total[p + t * population_size] =
         cost_L1 + cost_L2 + fitness_energy[p + t * population_size] +
         fitness_force[p + t * population_size] + fitness_virial[p + t * population_size] +
-        fitness_charge[p + t * population_size] + fitness_bec[p + t * population_size];
+        fitness_charge[p + t * population_size] + fitness_bec[p + t * population_size] +
+        fitness_dipole[p + t * population_size];
       fitness_L1[p + t * population_size] = cost_L1;
       fitness_L2[p + t * population_size] = cost_L2;
     }
