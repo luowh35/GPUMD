@@ -55,6 +55,7 @@ void Dataset::copy_structures(std::vector<Structure>& structures_input, int n1, 
     }
     for (int k = 0; k < 3; ++k) {
       structures[n].num_cell[k] = structures_input[n_input].num_cell[k];
+      structures[n].pbc[k] = structures_input[n_input].pbc[k];
       structures[n].dipole[k] = structures_input[n_input].dipole[k];
     }
 
@@ -161,6 +162,7 @@ void Dataset::initialize_gpu_data(Parameters& para)
 {
   std::vector<float> box_cpu(Nc * 18);
   std::vector<float> box_original_cpu(Nc * 9);
+  std::vector<int> pbc_cpu(Nc * 3);
   std::vector<int> num_cell_cpu(Nc * 3);
   std::vector<float> r_cpu(N * 3);
   std::vector<int> type_cpu(N);
@@ -223,6 +225,7 @@ void Dataset::initialize_gpu_data(Parameters& para)
     }
     for (int k = 0; k < 3; ++k) {
       num_cell_cpu[k + n * 3] = structures[n].num_cell[k];
+      pbc_cpu[k + n * 3] = structures[n].pbc[k];
     }
     for (int na = 0; na < structures[n].num_atom; ++na) {
       type_cpu[Na_sum_cpu[n] + na] = structures[n].type[na];
@@ -281,11 +284,13 @@ void Dataset::initialize_gpu_data(Parameters& para)
 
   box.resize(Nc * 18);
   box_original.resize(Nc * 9);
+  pbc.resize(Nc * 3);
   num_cell.resize(Nc * 3);
   r.resize(N * 3);
   type.resize(N);
   box.copy_from_host(box_cpu.data());
   box_original.copy_from_host(box_original_cpu.data());
+  pbc.copy_from_host(pbc_cpu.data());
   num_cell.copy_from_host(num_cell_cpu.data());
   r.copy_from_host(r_cpu.data());
   type.copy_from_host(type_cpu.data());
@@ -1092,7 +1097,7 @@ std::vector<float> Dataset::get_rmse_charge(Parameters& para, int device_id)
 std::vector<float> Dataset::get_rmse_dipole(Parameters& para, int device_id)
 {
   std::vector<float> rmse_array(para.num_types + 1, 0.0f);
-  if (!(para.charge_mode && para.has_dipole)) {
+  if (!(para.charge_mode && para.has_dipole && para.lambda_d > 0.0f)) {
     return rmse_array;
   }
 
