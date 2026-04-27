@@ -37,6 +37,7 @@ public:
   GPU_Vector<float> r;            // position
   GPU_Vector<float> box;          // (expanded) box and inverse box (18 components)
   GPU_Vector<float> box_original; // (original) box (9 components)
+  GPU_Vector<int> pbc;            // periodic boundary flags for each box direction
   GPU_Vector<int> num_cell;       // number of cells in the expanded box (3 components)
 
   GPU_Vector<float> charge;      // calculated charge in GPU

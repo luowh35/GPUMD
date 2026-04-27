@@ -1223,6 +1223,7 @@ static __global__ void find_k_and_G(
   const float alpha,
   const float alpha_factor,
   const float* g_box,
+  const int* g_pbc,
   int* g_num_kpoints,
   float* g_kx,
   float* g_ky,
@@ -1231,6 +1232,11 @@ static __global__ void find_k_and_G(
 {
   int nc = threadIdx.x + blockIdx.x * blockDim.x; // structure index
   if (nc < Nc) {
+    if (g_pbc != nullptr &&
+        (g_pbc[nc * 3] == 0 || g_pbc[nc * 3 + 1] == 0 || g_pbc[nc * 3 + 2] == 0)) {
+      g_num_kpoints[nc] = 0;
+      return;
+    }
     const float* box = g_box + 9 * nc;
     const float det = box[0] * (box[4] * box[8] - box[5] * box[7]) +
                       box[1] * (box[5] * box[6] - box[3] * box[8]) +
@@ -1270,16 +1276,19 @@ static __global__ void find_k_and_G(
           const float kz = n1 * b1[2] + n2 * b2[2] + n3 * b3[2];
           const float ksq = kx * kx + ky * ky + kz * kz;
           if (ksq < ksq_max) {
-            const int nc_nk = nc * num_kpoints_max + (nk++);
-            g_kx[nc_nk] = kx;
-            g_ky[nc_nk] = ky;
-            g_kz[nc_nk] = kz;
-            g_G[nc_nk] = 2.0f * abs(two_pi_over_det) / ksq * exp(-ksq * alpha_factor);
+            if (nk < num_kpoints_max) {
+              const int nc_nk = nc * num_kpoints_max + nk;
+              g_kx[nc_nk] = kx;
+              g_ky[nc_nk] = ky;
+              g_kz[nc_nk] = kz;
+              g_G[nc_nk] = 2.0f * abs(two_pi_over_det) / ksq * exp(-ksq * alpha_factor);
+            }
+            ++nk;
           }
         }
       }
     }
-    g_num_kpoints[nc] = nk;
+    g_num_kpoints[nc] = nk < num_kpoints_max ? nk : num_kpoints_max;
   }
 }
 
@@ -1695,14 +1704,15 @@ void NEP_Charge::find_force(
     }
     GPU_CHECK_KERNEL
 
+    const bool use_dipole_constraint = para.has_dipole && para.lambda_d > 0.0f;
     constrain_charge_and_dipole<<<
       dataset[device_id].Nc, 1024, sizeof(float) * 1024 * 6>>>(
       dataset[device_id].Na.data(),
       dataset[device_id].Na_sum.data(),
       dataset[device_id].charge_ref_gpu.data(),
-      para.has_dipole ? dataset[device_id].dipole_ref_gpu.data() : nullptr,
-      para.has_dipole ? dataset[device_id].has_dipole_gpu.data() : nullptr,
-      para.has_dipole,
+      use_dipole_constraint ? dataset[device_id].dipole_ref_gpu.data() : nullptr,
+      use_dipole_constraint ? dataset[device_id].has_dipole_gpu.data() : nullptr,
+      use_dipole_constraint,
       para.chi,
       dataset[device_id].r.data(),
       dataset[device_id].r.data() + dataset[device_id].N,
@@ -1765,6 +1775,7 @@ void NEP_Charge::find_force(
       charge_para.alpha,
       charge_para.alpha_factor,
       dataset[device_id].box_original.data(),
+      para.charge_respect_pbc ? dataset[device_id].pbc.data() : nullptr,
       nep_data[device_id].num_kpoints.data(),
       nep_data[device_id].kx.data(),
       nep_data[device_id].ky.data(),

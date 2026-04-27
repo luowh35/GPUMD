@@ -32,6 +32,7 @@ struct Structure {
   float energy_weight = 1.0f;
   float virial[6];
   float box_original[9];
+  int pbc[3] = {1, 1, 1};
   float volume;
   float box[18];
   float temperature;

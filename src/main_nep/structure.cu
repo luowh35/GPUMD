@@ -81,6 +81,40 @@ static bool parse_vector3_property(
   return true;
 }
 
+static bool parse_pbc_property(
+  const std::vector<std::string>& tokens,
+  const int token_index,
+  int pbc[3])
+{
+  const std::string key = "pbc=";
+  if (tokens[token_index].substr(0, key.length()) != key) {
+    return false;
+  }
+
+  std::string content = tokens[token_index].substr(key.length());
+  for (int offset = 1; offset < 3 && token_index + offset < tokens.size(); ++offset) {
+    content += " ";
+    content += tokens[token_index + offset];
+    if (tokens[token_index + offset].find('"') != std::string::npos) {
+      break;
+    }
+  }
+
+  content.erase(std::remove(content.begin(), content.end(), '"'), content.end());
+  std::replace(content.begin(), content.end(), ';', ' ');
+  std::replace(content.begin(), content.end(), ',', ' ');
+
+  std::istringstream iss(content);
+  std::string component;
+  for (int d = 0; d < 3; ++d) {
+    if (!(iss >> component)) {
+      return false;
+    }
+    pbc[d] = (component == "t" || component == "true" || component == "1") ? 1 : 0;
+  }
+  return true;
+}
+
 static void change_box(const Parameters& para, Structure& structure)
 {
   float a[3] = {structure.box_original[0], structure.box_original[3], structure.box_original[6]};
@@ -277,6 +311,15 @@ static void read_one_structure(
           tokens, n, dipole_string, xyz_filename.c_str(), line_number, structure.dipole)) {
       structure.has_dipole = true;
       para.has_dipole = true;
+      break;
+    }
+  }
+
+  structure.pbc[0] = 1;
+  structure.pbc[1] = 1;
+  structure.pbc[2] = 1;
+  for (int n = 0; n < tokens.size(); ++n) {
+    if (parse_pbc_property(tokens, n, structure.pbc)) {
       break;
     }
   }
@@ -637,6 +680,8 @@ static void reorder(const int num_batches, std::vector<Structure>& structures)
     structures_copy[nc].weight = structures[nc].weight;
     structures_copy[nc].has_virial = structures[nc].has_virial;
     structures_copy[nc].has_bec = structures[nc].has_bec;
+    structures_copy[nc].has_dipole = structures[nc].has_dipole;
+    structures_copy[nc].charge = structures[nc].charge;
     structures_copy[nc].energy = structures[nc].energy;
     structures_copy[nc].energy_weight = structures[nc].energy_weight;
     structures_copy[nc].has_temperature = structures[nc].has_temperature;
@@ -653,6 +698,8 @@ static void reorder(const int num_batches, std::vector<Structure>& structures)
     }
     for (int k = 0; k < 3; ++k) {
       structures_copy[nc].num_cell[k] = structures[nc].num_cell[k];
+      structures_copy[nc].pbc[k] = structures[nc].pbc[k];
+      structures_copy[nc].dipole[k] = structures[nc].dipole[k];
     }
     structures_copy[nc].type.resize(structures[nc].num_atom);
     structures_copy[nc].x.resize(structures[nc].num_atom);
@@ -681,6 +728,8 @@ static void reorder(const int num_batches, std::vector<Structure>& structures)
     structures[nc].weight = structures_copy[configuration_id[nc]].weight;
     structures[nc].has_virial = structures_copy[configuration_id[nc]].has_virial;
     structures[nc].has_bec = structures_copy[configuration_id[nc]].has_bec;
+    structures[nc].has_dipole = structures_copy[configuration_id[nc]].has_dipole;
+    structures[nc].charge = structures_copy[configuration_id[nc]].charge;
     structures[nc].energy = structures_copy[configuration_id[nc]].energy;
     structures[nc].energy_weight = structures_copy[configuration_id[nc]].energy_weight;
     structures[nc].has_temperature = structures_copy[configuration_id[nc]].has_temperature;
@@ -697,6 +746,8 @@ static void reorder(const int num_batches, std::vector<Structure>& structures)
     }
     for (int k = 0; k < 3; ++k) {
       structures[nc].num_cell[k] = structures_copy[configuration_id[nc]].num_cell[k];
+      structures[nc].pbc[k] = structures_copy[configuration_id[nc]].pbc[k];
+      structures[nc].dipole[k] = structures_copy[configuration_id[nc]].dipole[k];
     }
     structures[nc].type.resize(structures[nc].num_atom);
     structures[nc].x.resize(structures[nc].num_atom);
