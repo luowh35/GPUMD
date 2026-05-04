@@ -75,7 +75,6 @@ void Parameters::set_default_parameters()
   is_force_delta_set = false;
   is_use_typewise_cutoff_zbl_set = false;
   is_charge_mode_set = false;
-  is_charge_respect_pbc_set = false;
   is_lambda_d_set = false;
   is_chi_set = false;
   is_save_potential_set = false;
@@ -113,7 +112,6 @@ void Parameters::set_default_parameters()
   typewise_cutoff_zbl_factor = -1.0f;
   output_descriptor = false;
   charge_mode = 0;
-  charge_respect_pbc = 0;
 
   type_weight_cpu.resize(NUM_ELEMENTS);
   rc_radial.resize(NUM_ELEMENTS);
@@ -463,7 +461,6 @@ void Parameters::report_inputs()
     printf("        lambda_z = %g.\n", lambda_z);
     printf("        lambda_d = %g.\n", lambda_d);
     printf("        chi = %g.\n", chi);
-    printf("        charge_respect_pbc = %d.\n", charge_respect_pbc);
 
     if (has_multiple_cutoffs) {
       PRINT_INPUT_ERROR("Can only use uniform cutoff for qNEP.");
@@ -673,8 +670,6 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
     parse_output_descriptor(param, num_param);
   } else if (strcmp(param[0], "charge_mode") == 0) {
     parse_charge_mode(param, num_param);
-  } else if (strcmp(param[0], "charge_respect_pbc") == 0) {
-    parse_charge_respect_pbc(param, num_param);
   } else if (strcmp(param[0], "fine_tune") == 0) {
     parse_fine_tune(param, num_param);
   } else if (strcmp(param[0], "save_potential") == 0) {
@@ -1399,21 +1394,6 @@ void Parameters::parse_charge_mode(const char** param, int num_param)
 
   if (num_hidden_layers == 2) {
     PRINT_INPUT_ERROR("Can only use one hidden layer for qNEP.");
-  }
-}
-
-void Parameters::parse_charge_respect_pbc(const char** param, int num_param)
-{
-  is_charge_respect_pbc_set = true;
-
-  if (num_param != 2) {
-    PRINT_INPUT_ERROR("charge_respect_pbc should have 1 parameter.\n");
-  }
-  if (!is_valid_int(param[1], &charge_respect_pbc)) {
-    PRINT_INPUT_ERROR("charge_respect_pbc should be an integer.\n");
-  }
-  if (charge_respect_pbc < 0 || charge_respect_pbc > 1) {
-    PRINT_INPUT_ERROR("charge_respect_pbc should be 0 or 1.");
   }
 }
 

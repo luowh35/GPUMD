@@ -67,7 +67,6 @@ public:
   float typewise_cutoff_zbl_factor;
   int output_descriptor;
   int charge_mode; // add dynamic charge to NEP potential model
-  int charge_respect_pbc = 0; // 1 to disable k-space charge terms for non-periodic structures
   bool has_bec = false; // check if there are target BEC values
   bool has_dipole = false; // check if there are target dipole values
   int flip_charge = 0; // 1 for flipping charges upon restarting
@@ -102,7 +101,6 @@ public:
   bool is_zbl_set;
   bool is_use_typewise_cutoff_zbl_set;
   bool is_charge_mode_set;
-  bool is_charge_respect_pbc_set;
   bool is_lambda_d_set;
   bool is_chi_set;
 
@@ -171,7 +169,6 @@ private:
   void parse_use_typewise_cutoff_zbl(const char** param, int num_param);
   void parse_output_descriptor(const char** param, int num_param);
   void parse_charge_mode(const char** param, int num_param);
-  void parse_charge_respect_pbc(const char** param, int num_param);
   void parse_fine_tune(const char** param, int num_param);
   void parse_save_potential(const char** param, int num_param);
 };

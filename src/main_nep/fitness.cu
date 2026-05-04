@@ -678,7 +678,7 @@ void Fitness::update_energy_force_virial(
 
 void Fitness::update_charge(FILE* fid_charge, Dataset& dataset)
 {
-  dataset.charge.copy_to_host(dataset.charge_cpu.data());
+  dataset.charge_shifted.copy_to_host(dataset.charge_cpu.data());
   for (int nc = 0; nc < dataset.Nc; ++nc) {
     for (int m = 0; m < dataset.Na_cpu[nc]; ++m) {
       fprintf(fid_charge, "%g\n", dataset.charge_cpu[dataset.Na_sum_cpu[nc] + m]);
