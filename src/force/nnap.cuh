@@ -13,26 +13,39 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#pragma once
-#include "minimizer.cuh"
+/**
+ * NNAP interface for GPUMD
+ * @author liqa
+ */
 
-class Minimizer_SD : public Minimizer
+#ifdef USE_NNAP
+#pragma once
+#include <jni.h>
+#include "neighbor.cuh"
+#include "potential.cuh"
+
+class NNAP : public Potential
 {
 public:
-  Minimizer_SD(
-    const int fixed_group,
-    const int fixed_grouping_method,
-    const int number_of_atoms,
-    const int number_of_steps,
-    const double force_tolerance)
-    : Minimizer(fixed_group, fixed_grouping_method, number_of_atoms, number_of_steps, force_tolerance)
-  {
-  }
+  using Potential::compute;
+  NNAP(const char* filename, int num_atoms);
+  virtual ~NNAP(void);
 
-  void compute(
-    Force& force,
+  virtual void compute(
     Box& box,
-    Atom& atom,
-    GPU_Vector<double>& position_per_atom,
-    std::vector<Group>& group);
+    const GPU_Vector<int>& type,
+    const GPU_Vector<double>& position,
+    GPU_Vector<double>& potential,
+    GPU_Vector<double>& force,
+    GPU_Vector<double>& virial);
+    
+protected:
+  JNIEnv *mEnv = NULL;
+  jobject mCore = NULL;
+  Neighbor neighbor;
+  
+  GPU_Vector<float> nl_dx;
+  GPU_Vector<float> nl_dy;
+  GPU_Vector<float> nl_dz;
 };
+#endif

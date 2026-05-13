@@ -65,6 +65,10 @@ Output files
      - :ref:`compute <kw_compute>`
      - Time and space (group) averaged quantities
      - Append
+   * - :ref:`ttm_electron_temperature.out <ttm_electron_temperature_out>`
+     - :ref:`ensemble <kw_ensemble>` with :attr:`ttm` or :attr:`heat_ttm`
+     - Electron temperature snapshots on the TTM grid
+     - Overwrite
    * - :ref:`hac.out <hac_out>`
      - :ref:`compute_hac <kw_compute_hac>`
      - Thermal conductivity data from the :term:`EMD` method
@@ -100,6 +104,10 @@ Output files
    * - :ref:`msd.out <msd_out>`
      - :ref:`compute_msd <kw_compute_msd>`
      - Mean-square displacement (:term:`MSD`) data
+     - Append
+   * - :ref:`ic.out <ic_out>`
+     - :ref:`compute_ic <kw_compute_ic>`
+     - Iron conductivity (:term:`IC`) data
      - Append
    * - :ref:`cohesive.out <cohesive_out>`
      - :ref:`compute_cohesive <kw_compute_cohesive>`
@@ -160,6 +168,7 @@ Output files
    
    cohesive_out
    compute_out
+   ttm_electron_temperature_out
    D_out
    dos_out
    dpdt_out

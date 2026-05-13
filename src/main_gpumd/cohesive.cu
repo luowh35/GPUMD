@@ -22,6 +22,7 @@ Compute the cohesive energy curve with different deformations.
 #include "minimize/minimize.cuh"
 #include "minimize/minimizer_sd.cuh"
 #include "model/box.cuh"
+#include "model/atom.cuh"
 #include "model/group.cuh"
 #include "utilities/common.cuh"
 #include "utilities/error.cuh"
@@ -135,8 +136,13 @@ void Cohesive::parse_cohesive(const char** param, int num_param)
   if (deform_d < 0 || deform_d > 6) {
     PRINT_INPUT_ERROR("deform direction should >=0 and <= 6.\n");
   }
-  num_points = (round((end_factor - start_factor) * 10) * 100) + 1;
+  num_points = round((end_factor - start_factor) * 1000) + 1;
   printf("    num_points = %d.\n", num_points);
+
+  const char* deform_mode[] = {"uniaxial", "uniaxial", "uniaxial", 
+                               "biaxial", "biaxial", "biaxial", "triaxial"};
+  const char* deform_dir[] = {"x", "y", "z", "xy", "yz", "xz", "xyz"};
+  printf("    deform mode = %s - %s .\n", deform_mode[deform_d], deform_dir[deform_d]);
 
   delta_factor = 0.001; // (end_factor - start_factor) / (num_points - 1);
   deformation_type = 0; // deformation for cohesive
@@ -190,10 +196,11 @@ void Cohesive::compute_D()
         }
       } else if (deform_d > 2 && deform_d < 6) {
         for (int k = 3 * (deform_d - 3); k < 3 * (deform_d - 2) + 3; ++k) {
-          if (k > 8) {
-            k -= 9;
+          int ki = k;
+          if (ki > 8) {
+            ki -= 9;
           }
-          cpu_D[n].data[k] = factor;
+          cpu_D[n].data[ki] = factor;
         }
       } else {
         for (int k = 0; k < 9; ++k) {
@@ -337,16 +344,11 @@ void Cohesive::output(Box& box)
 
 void Cohesive::compute(
   Box& box,
-  GPU_Vector<double>& position_per_atom,
-  GPU_Vector<int>& type,
+  Atom& atom,
   std::vector<Group>& group,
-  GPU_Vector<double>& potential_per_atom,
-  GPU_Vector<double>& force_per_atom,
-  GPU_Vector<double>& virial_per_atom,
   Force& force)
 {
-  const int num_atoms = potential_per_atom.size();
-  allocate_memory(num_atoms);
+  allocate_memory(atom.number_of_atoms);
   compute_D();
 
   double old_inv[9];
@@ -357,22 +359,14 @@ void Cohesive::compute(
 
   for (int n = 0; n < num_points; ++n) {
     Box new_box;
-    deform_box(num_atoms, cpu_D[n], box, new_box, position_per_atom, old_box_inv);
+    deform_box(atom.number_of_atoms, cpu_D[n], box, new_box, atom.position_per_atom, old_box_inv);
 
-    Minimizer_SD minimizer(-1, 0, num_atoms, 1000, 1.0e-5);
-    minimizer.compute(
-      force,
-      new_box,
-      new_position_per_atom,
-      type,
-      group,
-      potential_per_atom,
-      force_per_atom,
-      virial_per_atom);
+    Minimizer_SD minimizer(-1, 0, atom.number_of_atoms, 1000, 1.0e-5);
+    minimizer.compute(force, new_box, atom, new_position_per_atom, group);
 
-    potential_per_atom.copy_to_host(cpu_potential_per_atom.data());
+    atom.potential_per_atom.copy_to_host(cpu_potential_per_atom.data());
     cpu_potential_total[n] = 0.0;
-    for (int i = 0; i < num_atoms; ++i) {
+    for (int i = 0; i < atom.number_of_atoms; ++i) {
       cpu_potential_total[n] += cpu_potential_per_atom[i];
     }
   }

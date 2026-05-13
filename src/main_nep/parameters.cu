@@ -80,10 +80,10 @@ void Parameters::set_default_parameters()
   train_mode = 0;              // potential
   prediction = 0;              // not prediction mode
   version = 4;                 // NEP4 is the best
-  basis_size_radial = 8;       // large enough in most cases
-  basis_size_angular = 8;      // large enough in most cases
-  n_max_radial = 4;            // a relatively small value to achieve high speed
-  n_max_angular = 4;           // a relatively small value to achieve high speed
+  basis_size_radial = 6;       // large enough in most cases
+  basis_size_angular = 6;      // large enough in most cases
+  n_max_radial = 6;            // large enough in most cases
+  n_max_angular = 6;           // large enough in most cases
   L_max = 4;                   // the only supported value
   L_max_4body = 2;             // default is to include 4body
   L_max_5body = 0;             // default is not to include 5body
@@ -926,13 +926,13 @@ void Parameters::parse_basis_size(const char** param, int num_param)
   }
   if (basis_size_radial < 0) {
     PRINT_INPUT_ERROR("basis_size_radial should >= 0.");
-  } else if (basis_size_radial > 16) {
-    PRINT_INPUT_ERROR("basis_size_radial should <= 16.");
+  } else if (basis_size_radial > 8) {
+    PRINT_INPUT_ERROR("basis_size_radial should <= 8.");
   }
   if (basis_size_angular < 0) {
     PRINT_INPUT_ERROR("basis_size_angular should >= 0.");
-  } else if (basis_size_angular > 12) {
-    PRINT_INPUT_ERROR("basis_size_angular should <= 12.");
+  } else if (basis_size_angular > 8) {
+    PRINT_INPUT_ERROR("basis_size_angular should <= 8.");
   }
 }
 
