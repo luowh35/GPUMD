@@ -16,6 +16,7 @@ Available potential models
 * :ref:`Embedded atom method (EAM) potential <eam>`
 * :ref:`Force constant potential (FCP) <fcp>`
 * :ref:`Lennard-Jones (LJ) potential <lennard_jones_potential>`
+* ``lj_cluster``: Lennard-Jones cluster potential with optional pairwise quartic confinement
 * :ref:`Neuroevolution potential (NEP) <nep_formalism>`
 * :ref:`Hybrid NEP+ILP potential <nep_ilp>`
 * :ref:`Hybrid SW+ILP potential <sw_ilp>`

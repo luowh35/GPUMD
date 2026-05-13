@@ -42,7 +42,15 @@ public:
     double f_max,
     int N_f,
     bool use_adaptive_qtb,
+    bool use_theta_correction,
+    bool use_legacy_scheme,
+    bool enforce_cutoff,
+    double cutoff_taper,
+    int adaptive_optimizer,
     double adaptive_rate,
+    double adaptive_tau_average,
+    double adaptive_tau_adapt,
+    double adaptive_smooth_width,
     double adaptive_window,
     const std::vector<double>& adaptive_rate_type);
 
@@ -80,28 +88,44 @@ private:
   double f_max_natural;
   double last_filter_temperature;
   double adaptive_rate;
+  double adaptive_tau_average;
+  double adaptive_tau_adapt;
+  double adaptive_smooth_width;
   double adaptive_window;
   double adaptive_gamma_min;
   double adaptive_gamma_max;
+  double legacy_force_prefactor;
 
   bool use_adaptive_qtb;
+  bool use_theta_correction;
+  bool use_legacy_scheme;
+  bool enforce_cutoff;
+  int adaptive_optimizer;
+  double cutoff_taper;
   bool filter_is_dirty;
   bool adaptive_qtb_initialized;
   bool adaptive_fft_plan_initialized;
   bool adaptive_gamma_floor_warning_issued;
+  bool legacy_fran_ready;
 
   std::vector<double> time_H_host;
   std::vector<int> atom_type_counts_host;
   std::vector<double> atom_type_masses_host;
   std::vector<double> adaptive_rate_type_host;
   std::vector<double> gamma_spectrum_host;
+  std::vector<double> gamma_initial_spectrum_host;
   std::vector<double> adaptive_vv_host;
   std::vector<double> adaptive_vr_raw_host;
   std::vector<double> adaptive_vr_host;
   std::vector<double> adaptive_ff_host;
+  std::vector<double> adaptive_vv_average_host;
+  std::vector<double> adaptive_vr_average_host;
+  std::vector<double> adaptive_gamma_running_host;
   std::vector<double> adaptive_vv_segment_host;
   std::vector<double> adaptive_vr_segment_raw_host;
   std::vector<double> adaptive_ff_segment_host;
+  std::vector<int> adaptive_average_count_host;
+  std::vector<int> adaptive_gamma_count_host;
   GPU_Vector<double> time_H_device;
   GPU_Vector<double> random_array_0;
   GPU_Vector<double> random_array_1;
@@ -117,6 +141,7 @@ private:
   FILE* adaptive_gamma_file;
   FILE* adaptive_fdt_file;
   FILE* adaptive_theta_file;
+  FILE* legacy_debug_file;
   double last_theta_dump_temperature;
 
   void init_qtb_common(
@@ -127,10 +152,20 @@ private:
     double f_max_input,
     int N_f_input,
     bool use_adaptive_qtb_input,
+    bool use_theta_correction_input,
+    bool use_legacy_scheme_input,
+    bool enforce_cutoff_input,
+    double cutoff_taper_input,
+    int adaptive_optimizer_input,
     double adaptive_rate_input,
+    double adaptive_tau_average_input,
+    double adaptive_tau_adapt_input,
+    double adaptive_smooth_width_input,
     double adaptive_window_input,
     const std::vector<double>& adaptive_rate_type_input);
   void initialize_adaptive_qtb();
+  bool load_adaptive_gamma_restart();
+  void write_adaptive_gamma_restart();
   void write_adaptive_qtb_diagnostics();
   void write_theta_correction_diagnostics(
     const double target_temperature,
@@ -138,8 +173,11 @@ private:
     const std::vector<double>& corrected_theta);
   void update_time_filter(const double target_temperature);
   void sample_adaptive_qtb();
+  void sample_adaptive_qtb_ou_center();
   void adapt_random_force_spectrum();
-  void refresh_colored_random_force();
+  void refresh_colored_random_force(const bool shift_history = true);
+  void apply_legacy_qtb_force(const std::vector<Group>& group);
+  void write_legacy_qtb_debug(const std::vector<Group>& group);
   void apply_qtb_force_half_step(const std::vector<Group>& group);
   void apply_qtb_position_half_step(const std::vector<Group>& group);
   void apply_qtb_ou_step();

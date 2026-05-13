@@ -45,6 +45,36 @@ The driver class for the various integrators.
 #include "utilities/read_file.cuh"
 #include <cstring>
 
+namespace
+{
+
+bool parse_qtb_adaptive_mode(
+  const char* token,
+  bool& use_adaptive)
+{
+  int adaptive_flag = 0;
+  if (is_valid_int(token, &adaptive_flag)) {
+    if (adaptive_flag != 0 && adaptive_flag != 1) {
+      return false;
+    }
+    use_adaptive = (adaptive_flag == 1);
+    return true;
+  }
+
+  if (strcmp(token, "off") == 0) {
+    use_adaptive = false;
+    return true;
+  }
+  if (strcmp(token, "on") == 0) {
+    use_adaptive = true;
+    return true;
+  }
+
+  return false;
+}
+
+} // namespace
+
 void Integrate::initialize(
   double time_step,
   Atom& atom,
@@ -101,18 +131,33 @@ void Integrate::initialize(
       ensemble.reset(new Ensemble_BAO(type, number_of_atoms, temperature, temperature_coupling));
       break;
     case 6: // NVT-QTB
-      ensemble.reset(new Ensemble_QTB(
-        type,
-        number_of_atoms,
-        temperature,
-        temperature_coupling,
-        time_step,
-        qtb_f_max,
-        qtb_n_f,
-        qtb_use_adaptive,
-        qtb_adaptive_rate,
-        qtb_adaptive_window,
-        qtb_adaptive_rate_type));
+      if (!ensemble || ensemble_dirty) {
+        ensemble.reset(new Ensemble_QTB(
+          type,
+          number_of_atoms,
+          temperature,
+          temperature_coupling,
+          time_step,
+          qtb_f_max,
+          qtb_n_f,
+          qtb_use_adaptive,
+          qtb_use_theta_correction,
+          qtb_use_legacy_scheme,
+          qtb_enforce_cutoff,
+          qtb_cutoff_taper,
+          qtb_adaptive_optimizer,
+          qtb_adaptive_rate,
+          qtb_adaptive_tau_average,
+          qtb_adaptive_tau_adapt,
+          qtb_adaptive_smooth_width,
+          qtb_adaptive_window,
+          qtb_adaptive_rate_type));
+        const double gamma_ps_inverse =
+          temperature_coupling > 0.0 && time_step > 0.0
+            ? 1000.0 / (temperature_coupling * time_step * TIME_UNIT_CONVERSION)
+            : 0.0;
+        printf("    effective gamma is %g ps^-1.\n", gamma_ps_inverse);
+      }
       break;
     case 11: // NPT-Berendsen
       ensemble.reset(new Ensemble_BER(
@@ -226,11 +271,13 @@ void Integrate::initialize(
   ensemble->group = &group;
   ensemble->time_step = time_step;
   ensemble->current_step = &this->current_step;
+  ensemble->current_step_absolute = &this->current_step_absolute;
   ensemble->total_steps = &this->total_steps;
   ensemble->thermo = &thermo;
   ensemble->fixed_group = fixed_group;
   ensemble->fixed_grouping_method = fixed_grouping_method;
   ensemble->move_grouping_method = move_grouping_method;
+  ensemble_dirty = false;
 }
 
 void Integrate::finalize()
@@ -363,10 +410,19 @@ void Integrate::parse_ensemble(
   std::vector<Group>& group,
   GPU_Vector<double>& thermo)
 {
+  ensemble_dirty = true;
   qtb_f_max = 200.0;
   qtb_n_f = 100;
   qtb_use_adaptive = false;
+  qtb_use_theta_correction = true;
+  qtb_use_legacy_scheme = false;
+  qtb_enforce_cutoff = false;
+  qtb_adaptive_optimizer = 1;
+  qtb_cutoff_taper = 0.0;
   qtb_adaptive_rate = 0.1;
+  qtb_adaptive_tau_average = -1.0;
+  qtb_adaptive_tau_adapt = 0.0;
+  qtb_adaptive_smooth_width = 0.0;
   qtb_adaptive_window = -1.0;
   qtb_adaptive_rate_type.assign(atom.cpu_type_size.size(), -1.0);
 
@@ -551,20 +607,48 @@ void Integrate::parse_ensemble(
           PRINT_INPUT_ERROR("N_f should > 0.");
         }
       } else if (strcmp(param[i], "adaptive") == 0) {
-        int adaptive_flag = 0;
-        if (!is_valid_int(param[i + 1], &adaptive_flag)) {
-          PRINT_INPUT_ERROR("adaptive should be 0 or 1.");
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("adaptive requires 0, 1, off, or on.");
         }
-        if (adaptive_flag != 0 && adaptive_flag != 1) {
-          PRINT_INPUT_ERROR("adaptive should be 0 or 1.");
+        if (!parse_qtb_adaptive_mode(param[i + 1], qtb_use_adaptive)) {
+          PRINT_INPUT_ERROR("adaptive should be 0, 1, off, or on.");
         }
-        qtb_use_adaptive = (adaptive_flag == 1);
+      } else if (strcmp(param[i], "theta_correction") == 0) {
+        int theta_correction_flag = 0;
+        if (!is_valid_int(param[i + 1], &theta_correction_flag)) {
+          PRINT_INPUT_ERROR("theta_correction should be 0 or 1.");
+        }
+        if (theta_correction_flag != 0 && theta_correction_flag != 1) {
+          PRINT_INPUT_ERROR("theta_correction should be 0 or 1.");
+        }
+        qtb_use_theta_correction = (theta_correction_flag == 1);
       } else if (strcmp(param[i], "adapt_rate") == 0) {
         if (!is_valid_real(param[i + 1], &qtb_adaptive_rate)) {
           PRINT_INPUT_ERROR("adapt_rate should be a number.");
         }
         if (qtb_adaptive_rate < 0.0) {
           PRINT_INPUT_ERROR("adapt_rate should be non-negative.");
+        }
+      } else if (strcmp(param[i], "adapt_tau_avg") == 0) {
+        if (!is_valid_real(param[i + 1], &qtb_adaptive_tau_average)) {
+          PRINT_INPUT_ERROR("adapt_tau_avg should be a number.");
+        }
+        if (qtb_adaptive_tau_average <= 0.0) {
+          PRINT_INPUT_ERROR("adapt_tau_avg should be positive.");
+        }
+      } else if (strcmp(param[i], "adapt_tau_adapt") == 0) {
+        if (!is_valid_real(param[i + 1], &qtb_adaptive_tau_adapt)) {
+          PRINT_INPUT_ERROR("adapt_tau_adapt should be a number.");
+        }
+        if (qtb_adaptive_tau_adapt < 0.0) {
+          PRINT_INPUT_ERROR("adapt_tau_adapt should be non-negative.");
+        }
+      } else if (strcmp(param[i], "adapt_smooth") == 0) {
+        if (!is_valid_real(param[i + 1], &qtb_adaptive_smooth_width)) {
+          PRINT_INPUT_ERROR("adapt_smooth should be a number.");
+        }
+        if (qtb_adaptive_smooth_width < 0.0) {
+          PRINT_INPUT_ERROR("adapt_smooth should be non-negative.");
         }
       } else if (strcmp(param[i], "adapt_window") == 0) {
         if (!is_valid_real(param[i + 1], &qtb_adaptive_window)) {
@@ -916,15 +1000,31 @@ void Integrate::parse_ensemble(
       printf("    tau_T is %g time_step.\n", temperature_coupling);
       printf("    f_max is %g ps^-1.\n", qtb_f_max);
       printf("    N_f is %d.\n", qtb_n_f);
+      printf(
+        "    theta correction is %s.\n",
+        qtb_use_theta_correction ? "enabled" : "disabled");
       if (qtb_use_adaptive) {
-      printf("    adaptive QTB is enabled.\n");
-      printf("    adapt_rate is %g.\n", qtb_adaptive_rate);
-      if (qtb_adaptive_rate == 0.0) {
-        printf("    adapt_rate=0 enables diagnostic-only mode (gamma spectrum will not adapt).\n");
-      }
-      if (qtb_adaptive_window > 0.0) {
-        printf("    adapt_window is %g time_step.\n", qtb_adaptive_window);
-      }
+        printf("    adaptive QTB is enabled.\n");
+        printf("    adapt_rate is %g.\n", qtb_adaptive_rate);
+        if (qtb_adaptive_rate == 0.0) {
+          printf("    adapt_rate=0 enables diagnostic-only mode (gamma spectrum will not adapt).\n");
+        }
+        if (qtb_adaptive_window > 0.0) {
+          printf("    adapt_window is %g time_step.\n", qtb_adaptive_window);
+        }
+        if (qtb_adaptive_optimizer == 1) {
+          if (qtb_adaptive_tau_average > 0.0) {
+            printf("    adapt_tau_avg is %g time_step.\n", qtb_adaptive_tau_average);
+          } else {
+            printf("    adapt_tau_avg defaults to 10 adaptive segments.\n");
+          }
+          if (qtb_adaptive_tau_adapt > 0.0) {
+            printf("    adapt_tau_adapt is %g time_step.\n", qtb_adaptive_tau_adapt);
+          }
+          if (qtb_adaptive_smooth_width > 0.0) {
+            printf("    adapt_smooth is %g ps^-1.\n", qtb_adaptive_smooth_width);
+          }
+        }
         for (int type_id = 0; type_id < int(qtb_adaptive_rate_type.size()); ++type_id) {
           if (qtb_adaptive_rate_type[type_id] > 0.0) {
             printf(

@@ -266,6 +266,7 @@ void Run::perform_a_run()
     global_time += time_step;
 
     integrate.current_step = step;
+    integrate.current_step_absolute = integrate.completed_steps + step;
     integrate.compute1(time_step, double(step) / number_of_steps, group, box, atom, thermo);
 
     if (integrate.type >= 31) { // PIMD
@@ -346,6 +347,7 @@ void Run::perform_a_run()
   velocity.finalize();
   force.finalize();
   max_distance_per_step = 0.0;
+  integrate.completed_steps += number_of_steps;
 }
 
 void Run::parse_one_keyword(std::vector<std::string>& tokens)

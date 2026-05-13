@@ -15,7 +15,6 @@
 
 /*----------------------------------------------------------------------------80
 NPT-QTB: Parrinello-Rahman barostat (MTTK) with QTB colored noise thermostat.
-Equivalent to LAMMPS fix nph + fix qtb.
 [1] Dammak, T., et al. Phys. Rev. Lett. 103, 190601 (2009).
 [2] Martyna, G. J., et al. J. Chem. Phys. 101, 4177 (1994).
 ------------------------------------------------------------------------------*/
@@ -24,12 +23,41 @@ Equivalent to LAMMPS fix nph + fix qtb.
 #include "langevin_utilities.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_macro.cuh"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <iostream>
+#include <sstream>
+#include <string>
 
 namespace
 {
+static bool parse_qtb_adaptive_mode(
+  const char* token,
+  bool& use_adaptive)
+{
+  int adaptive_flag = 0;
+  if (is_valid_int(token, &adaptive_flag)) {
+    if (adaptive_flag != 0 && adaptive_flag != 1) {
+      return false;
+    }
+    use_adaptive = (adaptive_flag == 1);
+    return true;
+  }
+
+  if (strcmp(token, "off") == 0) {
+    use_adaptive = false;
+    return true;
+  }
+  if (strcmp(token, "on") == 0) {
+    use_adaptive = true;
+    return true;
+  }
+
+  return false;
+}
+
 static int get_gamma_index_from_fft_bin(const int N_f, const int fft_bin)
 {
   if (fft_bin == 0) {
@@ -126,6 +154,41 @@ static double interpolate_uniform_spectrum(
   const double fraction = grid_index - left_index;
   return spectrum[left_index] * (1.0 - fraction) +
          spectrum[right_index] * fraction;
+}
+
+static void smooth_positive_spectrum(
+  std::vector<double>& spectrum,
+  const int offset,
+  const int positive_size,
+  const double width_bins)
+{
+  if (width_bins <= 0.0 || positive_size <= 1) {
+    return;
+  }
+
+  std::vector<double> input(size_t(positive_size), 0.0);
+  for (int i = 0; i < positive_size; ++i) {
+    input[i] = spectrum[offset + i];
+  }
+
+  for (int i = 0; i < positive_size; ++i) {
+    const int first = std::max(0, int(floor(i - width_bins)));
+    const int last = std::min(positive_size - 1, int(ceil(i + width_bins)));
+    double weighted_sum = 0.0;
+    double weight_sum = 0.0;
+    for (int j = first; j <= last; ++j) {
+      const double x = (j - i) / width_bins;
+      if (fabs(x) >= 1.0) {
+        continue;
+      }
+      const double weight = exp(-1.0 / (1.0 + x)) * exp(-1.0 / (1.0 - x));
+      weighted_sum += input[j] * weight;
+      weight_sum += weight;
+    }
+    if (weight_sum > 0.0) {
+      spectrum[offset + i] = weighted_sum / weight_sum;
+    }
+  }
 }
 
 static void compute_corrected_qtb_energy_density(
@@ -397,6 +460,45 @@ static __global__ void gpu_store_qtb_sample(
   }
 }
 
+static __global__ void gpu_store_qtb_half_step_center_sample(
+  const int N,
+  const int sample_index,
+  const int segment_length,
+  const double c1_sqrt,
+  const double dt_quarter,
+  const double* mass,
+  const double* vx,
+  const double* vy,
+  const double* vz,
+  const double* fran_x,
+  const double* fran_y,
+  const double* fran_z,
+  gpufftComplex* velocity_history,
+  gpufftComplex* random_history)
+{
+  const int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < N) {
+    const int offset_x = n * segment_length + sample_index;
+    const int offset_y = (n + N) * segment_length + sample_index;
+    const int offset_z = (n + 2 * N) * segment_length + sample_index;
+    const double mass_inv = 1.0 / mass[n];
+
+    velocity_history[offset_x].x = float(c1_sqrt * vx[n] + dt_quarter * fran_x[n] * mass_inv);
+    velocity_history[offset_x].y = 0.0f;
+    velocity_history[offset_y].x = float(c1_sqrt * vy[n] + dt_quarter * fran_y[n] * mass_inv);
+    velocity_history[offset_y].y = 0.0f;
+    velocity_history[offset_z].x = float(c1_sqrt * vz[n] + dt_quarter * fran_z[n] * mass_inv);
+    velocity_history[offset_z].y = 0.0f;
+
+    random_history[offset_x].x = float(fran_x[n]);
+    random_history[offset_x].y = 0.0f;
+    random_history[offset_y].x = float(fran_y[n]);
+    random_history[offset_y].y = 0.0f;
+    random_history[offset_z].x = float(fran_z[n]);
+    random_history[offset_z].y = 0.0f;
+  }
+}
+
 static __global__ void gpu_zero_qtb_spectrum_sums(
   const int size,
   double* adaptive_vv_sums,
@@ -468,7 +570,12 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
   qtb_f_max = 200.0;
   int qtb_n_f_input = 100;
   qtb_use_adaptive = false;
+  qtb_use_theta_correction = true;
+  qtb_adaptive_optimizer = 1;
   qtb_adaptive_rate = 0.1;
+  qtb_adaptive_tau_average = -1.0;
+  qtb_adaptive_tau_adapt = 0.0;
+  qtb_adaptive_smooth_width = 0.0;
   qtb_adaptive_window = 0.0;
   qtb_adaptive_gamma_file = nullptr;
   qtb_adaptive_fdt_file = nullptr;
@@ -622,14 +729,25 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
       }
       i += 2;
     } else if (strcmp(params[i], "adaptive") == 0) {
-      int adaptive_flag = 0;
       if (i + 1 >= num_params) {
-        PRINT_INPUT_ERROR("adaptive requires 0 or 1.");
+        PRINT_INPUT_ERROR("adaptive requires 0, 1, off, or on.");
       }
-      if (!is_valid_int(params[i + 1], &adaptive_flag)) {
-        PRINT_INPUT_ERROR("adaptive should be 0 or 1.");
+      if (!parse_qtb_adaptive_mode(params[i + 1], qtb_use_adaptive)) {
+        PRINT_INPUT_ERROR("adaptive should be 0, 1, off, or on.");
       }
-      qtb_use_adaptive = (adaptive_flag != 0);
+      i += 2;
+    } else if (strcmp(params[i], "theta_correction") == 0) {
+      int theta_correction_flag = 0;
+      if (i + 1 >= num_params) {
+        PRINT_INPUT_ERROR("theta_correction requires 0 or 1.");
+      }
+      if (!is_valid_int(params[i + 1], &theta_correction_flag)) {
+        PRINT_INPUT_ERROR("theta_correction should be 0 or 1.");
+      }
+      if (theta_correction_flag != 0 && theta_correction_flag != 1) {
+        PRINT_INPUT_ERROR("theta_correction should be 0 or 1.");
+      }
+      qtb_use_theta_correction = (theta_correction_flag != 0);
       i += 2;
     } else if (strcmp(params[i], "adapt_rate") == 0) {
       if (i + 1 >= num_params) {
@@ -640,6 +758,39 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
       }
       if (qtb_adaptive_rate < 0.0) {
         PRINT_INPUT_ERROR("adapt_rate should >= 0.");
+      }
+      i += 2;
+    } else if (strcmp(params[i], "adapt_tau_avg") == 0) {
+      if (i + 1 >= num_params) {
+        PRINT_INPUT_ERROR("adapt_tau_avg requires a value.");
+      }
+      if (!is_valid_real(params[i + 1], &qtb_adaptive_tau_average)) {
+        PRINT_INPUT_ERROR("adapt_tau_avg should be a number.");
+      }
+      if (qtb_adaptive_tau_average <= 0.0) {
+        PRINT_INPUT_ERROR("adapt_tau_avg should > 0.");
+      }
+      i += 2;
+    } else if (strcmp(params[i], "adapt_tau_adapt") == 0) {
+      if (i + 1 >= num_params) {
+        PRINT_INPUT_ERROR("adapt_tau_adapt requires a value.");
+      }
+      if (!is_valid_real(params[i + 1], &qtb_adaptive_tau_adapt)) {
+        PRINT_INPUT_ERROR("adapt_tau_adapt should be a number.");
+      }
+      if (qtb_adaptive_tau_adapt < 0.0) {
+        PRINT_INPUT_ERROR("adapt_tau_adapt should >= 0.");
+      }
+      i += 2;
+    } else if (strcmp(params[i], "adapt_smooth") == 0) {
+      if (i + 1 >= num_params) {
+        PRINT_INPUT_ERROR("adapt_smooth requires a value.");
+      }
+      if (!is_valid_real(params[i + 1], &qtb_adaptive_smooth_width)) {
+        PRINT_INPUT_ERROR("adapt_smooth should be a number.");
+      }
+      if (qtb_adaptive_smooth_width < 0.0) {
+        PRINT_INPUT_ERROR("adapt_smooth should >= 0.");
       }
       i += 2;
     } else if (strcmp(params[i], "adapt_window") == 0) {
@@ -695,6 +846,9 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
   printf("    QTB temperature: t_start=%g K, t_stop=%g K\n", t_start, t_stop);
   printf("    QTB tperiod=%g timesteps\n", t_period);
   printf("    QTB f_max=%g ps^-1, N_f=%d\n", qtb_f_max, qtb_N_f);
+  printf(
+    "    theta correction is %s.\n",
+    qtb_use_theta_correction ? "enabled" : "disabled");
   if (qtb_use_adaptive) {
     printf("    adaptive QTB is enabled.\n");
     printf("    adapt_rate is %g.\n", qtb_adaptive_rate);
@@ -703,6 +857,19 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
     }
     if (qtb_adaptive_window > 0.0) {
       printf("    adapt_window is %g time_step.\n", qtb_adaptive_window);
+    }
+    if (qtb_adaptive_optimizer == 1) {
+      if (qtb_adaptive_tau_average > 0.0) {
+        printf("    adapt_tau_avg is %g time_step.\n", qtb_adaptive_tau_average);
+      } else {
+        printf("    adapt_tau_avg defaults to 10 adaptive segments.\n");
+      }
+      if (qtb_adaptive_tau_adapt > 0.0) {
+        printf("    adapt_tau_adapt is %g time_step.\n", qtb_adaptive_tau_adapt);
+      }
+      if (qtb_adaptive_smooth_width > 0.0) {
+        printf("    adapt_smooth is %g ps^-1.\n", qtb_adaptive_smooth_width);
+      }
     }
     for (int type_id = 0; type_id < int(qtb_adaptive_rate_type_host.size()); ++type_id) {
       if (qtb_adaptive_rate_type_host[type_id] > 0.0) {
@@ -731,6 +898,9 @@ Ensemble_NPT_QTB::Ensemble_NPT_QTB(const char** params, int num_params)
 
 Ensemble_NPT_QTB::~Ensemble_NPT_QTB(void)
 {
+  if (qtb_adaptive_initialized) {
+    write_adaptive_gamma_restart();
+  }
   if (qtb_adaptive_gamma_file) {
     fclose(qtb_adaptive_gamma_file);
   }
@@ -774,11 +944,12 @@ void Ensemble_NPT_QTB::init_qtb()
 
   qtb_h_timestep = qtb_alpha * qtb_dt;
   qtb_fric_coef = 1.0 / (t_period * qtb_dt);
+  temperature = t_start;
   qtb_counter_mu = 0;
   qtb_adaptive_segment_length = qtb_nfreq2;
   qtb_last_filter_temperature = -1.0;
   if (qtb_adaptive_window > 0.0) {
-    int segment_estimate = int(floor(qtb_adaptive_window / qtb_alpha + 0.5));
+    int segment_estimate = int(floor(qtb_adaptive_window + 0.5));
     if (segment_estimate < 2) {
       segment_estimate = 2;
     }
@@ -787,6 +958,12 @@ void Ensemble_NPT_QTB::init_qtb()
     }
     qtb_adaptive_segment_length = segment_estimate;
   }
+  qtb_adaptive_tau_average =
+    qtb_adaptive_tau_average > 0.0
+      ? qtb_adaptive_tau_average * qtb_dt
+      : 10.0 * qtb_adaptive_segment_length * qtb_dt;
+  qtb_adaptive_tau_adapt =
+    qtb_adaptive_tau_adapt > 0.0 ? qtb_adaptive_tau_adapt * qtb_dt : 0.0;
   qtb_adaptive_gamma_min = 0.01 * qtb_fric_coef;
   qtb_adaptive_gamma_max = 20.0 * qtb_fric_coef;
   qtb_filter_is_dirty = true;
@@ -798,6 +975,7 @@ void Ensemble_NPT_QTB::init_qtb()
   qtb_time_H_host.resize(qtb_nfreq2, 0.0);
   qtb_time_H_device.resize(qtb_nfreq2);
   qtb_gamma_spectrum_host.resize(qtb_nfreq2, qtb_fric_coef);
+  qtb_gamma_initial_spectrum_host = qtb_gamma_spectrum_host;
 
   const size_t history_size = size_t(qtb_number_of_atoms) * size_t(qtb_nfreq2);
   qtb_random_array_0.resize(history_size);
@@ -855,10 +1033,17 @@ void Ensemble_NPT_QTB::initialize_adaptive_qtb()
   qtb_time_H_device.resize(size_t(qtb_time_filter_count) * size_t(qtb_nfreq2));
   qtb_gamma_spectrum_host.resize(
     size_t(qtb_time_filter_count) * size_t(qtb_nfreq2), qtb_fric_coef);
+  qtb_gamma_initial_spectrum_host = qtb_gamma_spectrum_host;
   qtb_adaptive_vv_host.resize(size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
   qtb_adaptive_vr_raw_host.resize(size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
   qtb_adaptive_vr_host.resize(size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
   qtb_adaptive_ff_host.resize(size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
+  qtb_adaptive_vv_average_host.resize(
+    size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
+  qtb_adaptive_vr_average_host.resize(
+    size_t(qtb_number_of_atom_types) * size_t(qtb_nfreq2), 0.0);
+  qtb_adaptive_gamma_running_host = qtb_gamma_spectrum_host;
+  qtb_adaptive_average_count_host.resize(size_t(qtb_number_of_atom_types), 0);
   qtb_adaptive_vv_segment_host.resize(
     size_t(qtb_number_of_atom_types) * size_t(qtb_adaptive_segment_length), 0.0);
   qtb_adaptive_vr_segment_raw_host.resize(
@@ -894,16 +1079,98 @@ void Ensemble_NPT_QTB::initialize_adaptive_qtb()
   qtb_adaptive_initialized = true;
   qtb_filter_is_dirty = true;
 
-  qtb_adaptive_gamma_file = my_fopen("qtb_adaptive_gamma.out", "w");
-  qtb_adaptive_fdt_file = my_fopen("qtb_adaptive_fdt.out", "w");
-  qtb_adaptive_theta_file = my_fopen("qtb_theta_correction.out", "w");
+  if (load_adaptive_gamma_restart()) {
+    qtb_adaptive_gamma_running_host = qtb_gamma_spectrum_host;
+    qtb_gamma_initial_spectrum_host = qtb_gamma_spectrum_host;
+  }
+
+  const char* diagnostic_mode = *current_step_absolute > 0 ? "a" : "w";
+  qtb_adaptive_gamma_file = my_fopen("qtb_adaptive_gamma.out", diagnostic_mode);
+  qtb_adaptive_fdt_file = my_fopen("qtb_adaptive_fdt.out", diagnostic_mode);
+  qtb_adaptive_theta_file = my_fopen("qtb_theta_correction.out", diagnostic_mode);
   fprintf(qtb_adaptive_gamma_file, "# update step time_ps type frequency_ps^-1 gamma_ps^-1\n");
   fprintf(
     qtb_adaptive_fdt_file,
-    "# update step time_ps type frequency_ps^-1 delta_fdt_ps^-2 c_vv c_vr c_vr_raw c_ff gamma_ps^-1\n");
+    "# update step time_ps type frequency_ps^-1 dFDT_ps^-2 mCvv Cvf Cvf_raw Cff gamma_ps^-1\n");
   fprintf(
     qtb_adaptive_theta_file,
     "# step time_ps frequency_ps^-1 theta_raw_eV theta_corrected_eV correction_ratio\n");
+}
+
+bool Ensemble_NPT_QTB::load_adaptive_gamma_restart()
+{
+  std::ifstream input("qtb_gamma_restart.out");
+  if (!input.good()) {
+    return false;
+  }
+
+  const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
+  const double frequency_spacing = frequency_conversion / (qtb_nfreq2 * qtb_h_timestep);
+  std::string line;
+  int loaded = 0;
+  while (std::getline(input, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+
+    std::istringstream stream(line);
+    int type = 0;
+    double frequency_ps = 0.0;
+    double gamma_ps = 0.0;
+    if (!(stream >> type >> frequency_ps >> gamma_ps)) {
+      continue;
+    }
+    if (type < 0 || type >= qtb_time_filter_count || frequency_spacing <= 0.0) {
+      continue;
+    }
+
+    int k = int(floor(frequency_ps / frequency_spacing + 0.5));
+    if (k < 0 || k > qtb_N_f) {
+      continue;
+    }
+    const int type_offset = type * qtb_nfreq2;
+    const int gamma_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, k);
+    const double gamma_value = gamma_ps / frequency_conversion;
+    qtb_gamma_spectrum_host[gamma_index] = gamma_value;
+    if (k > 0 && k < qtb_N_f) {
+      qtb_gamma_spectrum_host[type_offset + qtb_N_f - k] = gamma_value;
+    }
+    loaded++;
+  }
+
+  if (loaded > 0) {
+    std::cout << "Loaded " << loaded
+              << " adQTB gamma values from qtb_gamma_restart.out." << std::endl;
+  }
+  return loaded > 0;
+}
+
+void Ensemble_NPT_QTB::write_adaptive_gamma_restart()
+{
+  if (qtb_gamma_spectrum_host.empty() || qtb_time_filter_count <= 0) {
+    return;
+  }
+
+  std::ofstream output("qtb_gamma_restart.out");
+  if (!output.good()) {
+    return;
+  }
+
+  const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
+  output << "# GPUMD adQTB gamma restart\n";
+  output << "# columns: type frequency_ps^-1 gamma_ps^-1\n";
+  output << "# N_f " << qtb_N_f << " nfreq2 " << qtb_nfreq2
+         << " filters " << qtb_time_filter_count << "\n";
+  for (int type = 0; type < qtb_time_filter_count; ++type) {
+    const int type_offset = type * qtb_nfreq2;
+    for (int k = 0; k <= qtb_N_f; ++k) {
+      const int gamma_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, k);
+      const double frequency_ps = k * frequency_conversion / (qtb_nfreq2 * qtb_h_timestep);
+      output << type << " " << frequency_ps << " "
+             << qtb_gamma_spectrum_host[gamma_index] * frequency_conversion << "\n";
+    }
+    output << "\n";
+  }
 }
 
 void Ensemble_NPT_QTB::get_target_temp()
@@ -917,7 +1184,7 @@ void Ensemble_NPT_QTB::write_adaptive_qtb_diagnostics()
     return;
   }
 
-  const double time_ps = (*current_step) * qtb_dt * TIME_UNIT_CONVERSION / 1000.0;
+  const double time_ps = (*current_step_absolute) * qtb_dt * TIME_UNIT_CONVERSION / 1000.0;
   const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
 
   for (int type = 0; type < qtb_number_of_atom_types; ++type) {
@@ -937,15 +1204,15 @@ void Ensemble_NPT_QTB::write_adaptive_qtb_diagnostics()
       const double c_vr_raw = qtb_adaptive_vr_raw_host[type_offset + k] * normalization;
       const double c_ff = qtb_adaptive_ff_host[type_offset + k] * normalization;
       const double delta_fdt =
-        (qtb_adaptive_vr_host[type_offset + k] -
-         gamma_k * qtb_adaptive_vv_host[type_offset + k]) *
+        (gamma_k * qtb_adaptive_vv_host[type_offset + k] -
+         qtb_adaptive_vr_host[type_offset + k]) *
         normalization * frequency_conversion * frequency_conversion;
 
       fprintf(
         qtb_adaptive_gamma_file,
         "%d %d %.8f %d %.8f %.8e\n",
         qtb_adaptive_update_count,
-        *current_step,
+        *current_step_absolute,
         time_ps,
         type,
         frequency_ps,
@@ -954,7 +1221,7 @@ void Ensemble_NPT_QTB::write_adaptive_qtb_diagnostics()
         qtb_adaptive_fdt_file,
         "%d %d %.8f %d %.8f %.8e %.8e %.8e %.8e %.8e %.8e\n",
         qtb_adaptive_update_count,
-        *current_step,
+        *current_step_absolute,
         time_ps,
         type,
         frequency_ps,
@@ -985,7 +1252,7 @@ void Ensemble_NPT_QTB::write_theta_correction_diagnostics(
     return;
   }
 
-  const double time_ps = (*current_step) * qtb_dt * TIME_UNIT_CONVERSION / 1000.0;
+  const double time_ps = (*current_step_absolute) * qtb_dt * TIME_UNIT_CONVERSION / 1000.0;
   const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
 
   for (int k = 0; k <= qtb_N_f; ++k) {
@@ -998,7 +1265,7 @@ void Ensemble_NPT_QTB::write_theta_correction_diagnostics(
     fprintf(
       qtb_adaptive_theta_file,
       "%d %.8f %.8f %.8e %.8e %.8e\n",
-      *current_step,
+      *current_step_absolute,
       time_ps,
       frequency_ps,
       raw_theta[k],
@@ -1038,7 +1305,9 @@ void Ensemble_NPT_QTB::qtb_update_time_filter(const double target_temperature)
       const int positive_index = abs(int(k_shift));
       const double omega_k = positive_index * PI / (qtb_N_f * qtb_h_timestep);
       const double g_k = get_ou_spectrum_correction(omega_k, qtb_fric_coef, qtb_h_timestep);
-      const double theta_k = corrected_theta[positive_index];
+      const double theta_k = qtb_use_theta_correction
+                               ? corrected_theta[positive_index]
+                               : raw_theta[positive_index];
       const double prefactor = 24.0 * gamma_k * theta_k * g_k / qtb_h_timestep;
 
       if (k == qtb_N_f) {
@@ -1150,6 +1419,39 @@ void Ensemble_NPT_QTB::sample_adaptive_qtb()
   }
 }
 
+void Ensemble_NPT_QTB::sample_adaptive_qtb_half_step_center()
+{
+  if (!qtb_use_adaptive || !qtb_adaptive_initialized) {
+    return;
+  }
+
+  const double dt_half = 0.5 * qtb_dt;
+  const double c1_sqrt = exp(-0.5 * qtb_fric_coef * dt_half);
+  const double dt_quarter = 0.25 * qtb_dt;
+  gpu_store_qtb_half_step_center_sample<<<(qtb_number_of_atoms - 1) / 128 + 1, 128>>>(
+    qtb_number_of_atoms,
+    qtb_adaptive_sample_count,
+    qtb_adaptive_segment_length,
+    c1_sqrt,
+    dt_quarter,
+    atom->mass.data(),
+    atom->velocity_per_atom.data(),
+    atom->velocity_per_atom.data() + qtb_number_of_atoms,
+    atom->velocity_per_atom.data() + 2 * qtb_number_of_atoms,
+    qtb_fran.data(),
+    qtb_fran.data() + qtb_number_of_atoms,
+    qtb_fran.data() + 2 * qtb_number_of_atoms,
+    qtb_adaptive_velocity_history.data(),
+    qtb_adaptive_random_history.data());
+  GPU_CHECK_KERNEL
+
+  qtb_adaptive_sample_count++;
+  if (qtb_adaptive_sample_count == qtb_adaptive_segment_length) {
+    adapt_random_force_spectrum();
+    qtb_adaptive_sample_count = 0;
+  }
+}
+
 void Ensemble_NPT_QTB::adapt_random_force_spectrum()
 {
   const int num_sums = qtb_number_of_atom_types * qtb_adaptive_segment_length;
@@ -1199,20 +1501,15 @@ void Ensemble_NPT_QTB::adapt_random_force_spectrum()
   for (int type = 0; type < qtb_number_of_atom_types; ++type) {
     const int type_offset = type * qtb_nfreq2;
     const int segment_type_offset = type * qtb_adaptive_segment_length;
-    const double atom_mass = qtb_atom_type_masses_host[type];
-    // The random force is refreshed once per coarse h_timestep block and kept
-    // constant within that block. The sampled velocity therefore differs from
-    // the block-centered velocity by half a coarse block of OU propagation.
-    const double half_decay = exp(-0.5 * qtb_fric_coef * qtb_h_timestep);
-    const double half_response =
-      qtb_fric_coef > 0.0 ? (1.0 - half_decay) / qtb_fric_coef : 0.5 * qtb_h_timestep;
+    const double sample_timestep = qtb_dt;
     std::vector<double> delta_fdt(size_t(qtb_N_f) + 1, 0.0);
     double delta_norm_sq = 0.0;
+    const double segment_time = qtb_adaptive_segment_length * sample_timestep;
 
     for (int k = 0; k <= qtb_N_f; ++k) {
-      const int gamma_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, k);
-      const double gamma_k = qtb_gamma_spectrum_host[gamma_index];
-      const double adaptive_bin = double(k) * qtb_adaptive_segment_length / qtb_nfreq2;
+      const double adaptive_bin =
+        double(k) * qtb_adaptive_segment_length * sample_timestep /
+        (double(qtb_nfreq2) * qtb_h_timestep);
       qtb_adaptive_vv_host[type_offset + k] = interpolate_adaptive_spectrum(
         qtb_adaptive_vv_segment_host,
         qtb_adaptive_segment_length,
@@ -1228,39 +1525,109 @@ void Ensemble_NPT_QTB::adapt_random_force_spectrum()
         qtb_adaptive_segment_length,
         segment_type_offset,
         adaptive_bin);
-      qtb_adaptive_vr_host[type_offset + k] =
-        (qtb_adaptive_vr_raw_host[type_offset + k] -
-         half_response * qtb_adaptive_ff_host[type_offset + k] / atom_mass) /
-        half_decay;
+      qtb_adaptive_vr_host[type_offset + k] = qtb_adaptive_vr_raw_host[type_offset + k];
+    }
+
+    if (qtb_adaptive_optimizer == 1 && qtb_adaptive_smooth_width > 0.0) {
+      const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
+      const double frequency_spacing = frequency_conversion / (qtb_nfreq2 * qtb_h_timestep);
+      const double smooth_width_bins =
+        frequency_spacing > 0.0 ? qtb_adaptive_smooth_width / frequency_spacing : 0.0;
+      smooth_positive_spectrum(qtb_adaptive_vv_host, type_offset, qtb_N_f + 1, smooth_width_bins);
+      smooth_positive_spectrum(qtb_adaptive_vr_host, type_offset, qtb_N_f + 1, smooth_width_bins);
+    }
+
+    double elapsed_average_time = segment_time;
+    if (qtb_adaptive_optimizer == 1) {
+      const double average_decay =
+        qtb_adaptive_tau_average > 0.0 ? exp(-segment_time / qtb_adaptive_tau_average) : 0.0;
+      const int average_count = ++qtb_adaptive_average_count_host[type];
+      elapsed_average_time = average_count * segment_time;
+      double average_bias_correction =
+        qtb_adaptive_tau_average > 0.0 ? 1.0 - pow(average_decay, average_count) : 1.0;
+      if (average_bias_correction < 1.0e-12) {
+        average_bias_correction = 1.0;
+      }
+      for (int k = 0; k <= qtb_N_f; ++k) {
+        const int index = type_offset + k;
+        qtb_adaptive_vv_average_host[index] =
+          average_decay * qtb_adaptive_vv_average_host[index] +
+          (1.0 - average_decay) * qtb_adaptive_vv_host[index];
+        qtb_adaptive_vr_average_host[index] =
+          average_decay * qtb_adaptive_vr_average_host[index] +
+          (1.0 - average_decay) * qtb_adaptive_vr_host[index];
+        qtb_adaptive_vv_host[index] =
+          qtb_adaptive_vv_average_host[index] / average_bias_correction;
+        qtb_adaptive_vr_host[index] =
+          qtb_adaptive_vr_average_host[index] / average_bias_correction;
+      }
+    }
+
+    for (int k = 1; k <= qtb_N_f; ++k) {
+      const int gamma_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, k);
+      const double gamma_k = qtb_gamma_spectrum_host[gamma_index];
       const double delta_fdt_k =
-        qtb_adaptive_vr_host[type_offset + k] -
-        gamma_k * qtb_adaptive_vv_host[type_offset + k];
+        gamma_k * qtb_adaptive_vv_host[type_offset + k] -
+        qtb_adaptive_vr_host[type_offset + k];
       delta_fdt[k] = delta_fdt_k;
       delta_norm_sq += delta_fdt_k * delta_fdt_k;
     }
 
     const double delta_norm = sqrt(delta_norm_sq);
-    if (delta_norm < 1.0e-30) {
+    if (delta_norm < 1.0e-30 && qtb_adaptive_optimizer == 0) {
       continue;
     }
 
-    for (int k = 0; k <= qtb_N_f; ++k) {
+    for (int k = 1; k <= qtb_N_f; ++k) {
       const int gamma_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, k);
       const double adaptive_rate_type = qtb_adaptive_rate_type_host[type];
       const double gamma_old = qtb_gamma_spectrum_host[gamma_index];
-      const double gamma_new =
-        gamma_old + adaptive_rate_type * gamma_old * delta_fdt[k] / delta_norm;
+      double gamma_new = gamma_old;
+      if (qtb_adaptive_optimizer == 1) {
+        const double vv = qtb_adaptive_vv_host[type_offset + k];
+        if (vv > 1.0e-30) {
+          const double gamma_target = qtb_adaptive_vr_host[type_offset + k] / vv;
+          if (std::isfinite(gamma_target)) {
+            const double blend = fmax(0.0, fmin(1.0, adaptive_rate_type));
+            double gamma_candidate = gamma_target;
+            if (qtb_adaptive_tau_average > 0.0 && elapsed_average_time < qtb_adaptive_tau_average) {
+              const double warmup = elapsed_average_time / qtb_adaptive_tau_average;
+              gamma_candidate =
+                warmup * gamma_target +
+                (1.0 - warmup) * qtb_gamma_initial_spectrum_host[gamma_index];
+            }
+            gamma_new = (1.0 - blend) * gamma_old + blend * gamma_candidate;
+            if (qtb_adaptive_tau_adapt > 0.0 && elapsed_average_time >= qtb_adaptive_tau_average) {
+              const double gamma_decay = exp(-segment_time / qtb_adaptive_tau_adapt);
+              qtb_adaptive_gamma_running_host[gamma_index] =
+                gamma_decay * qtb_adaptive_gamma_running_host[gamma_index] +
+                (1.0 - gamma_decay) * gamma_new;
+              gamma_new = qtb_adaptive_gamma_running_host[gamma_index];
+            }
+          }
+        }
+      } else {
+        gamma_new =
+          gamma_old - adaptive_rate_type * qtb_fric_coef * delta_fdt[k] / delta_norm;
+      }
       const double gamma_clamped =
         fmax(qtb_adaptive_gamma_min, fmin(qtb_adaptive_gamma_max, gamma_new));
       if (gamma_clamped <= qtb_adaptive_gamma_min && gamma_new < qtb_adaptive_gamma_min) {
         clamped_gamma_bins++;
       }
       qtb_gamma_spectrum_host[gamma_index] = gamma_clamped;
+      qtb_adaptive_gamma_running_host[gamma_index] = gamma_clamped;
 
       if (k > 0 && k < qtb_N_f) {
         qtb_gamma_spectrum_host[type_offset + qtb_N_f - k] = gamma_clamped;
+        qtb_adaptive_gamma_running_host[type_offset + qtb_N_f - k] = gamma_clamped;
       }
     }
+
+    const int zero_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, 0);
+    const int first_index = type_offset + get_gamma_index_from_fft_bin(qtb_N_f, 1);
+    qtb_gamma_spectrum_host[zero_index] = qtb_gamma_spectrum_host[first_index];
+    qtb_adaptive_gamma_running_host[zero_index] = qtb_adaptive_gamma_running_host[first_index];
   }
 
   qtb_adaptive_update_count++;
@@ -1274,6 +1641,7 @@ void Ensemble_NPT_QTB::adapt_random_force_spectrum()
     qtb_adaptive_gamma_floor_warning_issued = true;
   }
   write_adaptive_qtb_diagnostics();
+  write_adaptive_gamma_restart();
   qtb_filter_is_dirty = true;
 }
 
@@ -1294,6 +1662,9 @@ void Ensemble_NPT_QTB::compute1(
   if (qtb_counter_mu == 0) {
     qtb_update_time_filter(t_target);
     qtb_refresh_colored_random_force();
+  }
+  if (qtb_use_adaptive) {
+    sample_adaptive_qtb_half_step_center();
   }
   qtb_apply_half_step();
 
@@ -1322,9 +1693,6 @@ void Ensemble_NPT_QTB::compute2(
   nh_omega_dot();
 
   qtb_apply_half_step();
-  if (qtb_counter_mu == qtb_alpha - 1) {
-    sample_adaptive_qtb();
-  }
 
   nhc_press_integrate();
   find_thermo();

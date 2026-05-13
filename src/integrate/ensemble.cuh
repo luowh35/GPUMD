@@ -64,6 +64,7 @@ public:
     GPU_Vector<double>& thermo);
 
   int* current_step;
+  int* current_step_absolute;
   int* total_steps;
   double time_step;
   const std::vector<Group>* group;

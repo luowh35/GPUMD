@@ -61,6 +61,7 @@ private:
   int qtb_time_filter_count;
   int qtb_adaptive_sample_count;
   int qtb_adaptive_update_count;
+  int qtb_adaptive_optimizer;
 
   double qtb_dt;
   double qtb_h_timestep;
@@ -68,6 +69,9 @@ private:
   double qtb_f_max_natural;
   double qtb_last_filter_temperature;
   double qtb_adaptive_rate;
+  double qtb_adaptive_tau_average;
+  double qtb_adaptive_tau_adapt;
+  double qtb_adaptive_smooth_width;
   double qtb_adaptive_window;
   double qtb_adaptive_gamma_min;
   double qtb_adaptive_gamma_max;
@@ -78,13 +82,18 @@ private:
   std::vector<double> qtb_atom_type_masses_host;
   std::vector<double> qtb_adaptive_rate_type_host;
   std::vector<double> qtb_gamma_spectrum_host;
+  std::vector<double> qtb_gamma_initial_spectrum_host;
   std::vector<double> qtb_adaptive_vv_host;
   std::vector<double> qtb_adaptive_vr_raw_host;
   std::vector<double> qtb_adaptive_vr_host;
   std::vector<double> qtb_adaptive_ff_host;
+  std::vector<double> qtb_adaptive_vv_average_host;
+  std::vector<double> qtb_adaptive_vr_average_host;
+  std::vector<double> qtb_adaptive_gamma_running_host;
   std::vector<double> qtb_adaptive_vv_segment_host;
   std::vector<double> qtb_adaptive_vr_segment_raw_host;
   std::vector<double> qtb_adaptive_ff_segment_host;
+  std::vector<int> qtb_adaptive_average_count_host;
   GPU_Vector<double> qtb_time_H_device;
   GPU_Vector<double> qtb_random_array_0;
   GPU_Vector<double> qtb_random_array_1;
@@ -103,6 +112,7 @@ private:
   double qtb_last_theta_dump_temperature;
 
   bool qtb_use_adaptive;
+  bool qtb_use_theta_correction;
   bool qtb_filter_is_dirty;
   bool qtb_adaptive_initialized;
   bool qtb_adaptive_fft_plan_initialized;
@@ -110,6 +120,8 @@ private:
 
   void init_qtb();
   void initialize_adaptive_qtb();
+  bool load_adaptive_gamma_restart();
+  void write_adaptive_gamma_restart();
   void write_adaptive_qtb_diagnostics();
   void write_theta_correction_diagnostics(
     const double target_temperature,
@@ -117,6 +129,7 @@ private:
     const std::vector<double>& corrected_theta);
   void qtb_update_time_filter(const double target_temperature);
   void sample_adaptive_qtb();
+  void sample_adaptive_qtb_half_step_center();
   void adapt_random_force_spectrum();
   void qtb_refresh_colored_random_force();
   void qtb_apply_half_step();
