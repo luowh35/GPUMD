@@ -32,15 +32,8 @@ The QTB thermostat based on a colored noise filter:
 
 namespace
 {
-static __device__ double draw_qtb_white_noise(gpurandState* state, const bool use_legacy_scheme)
+static __device__ double draw_qtb_white_noise(gpurandState* state)
 {
-  if (use_legacy_scheme) {
-#ifdef USE_HIP
-    return hiprand_uniform(state) - 0.5;
-#else
-    return curand_uniform(state) - 0.5;
-#endif
-  }
   return gpurand_normal_double(state) / sqrt(12.0);
 }
 
@@ -328,7 +321,6 @@ static __global__ void gpu_initialize_qtb_history(
   gpurandState* states,
   const int N,
   const int nfreq2,
-  const bool use_legacy_scheme,
   double* random_array_0,
   double* random_array_1,
   double* random_array_2)
@@ -338,9 +330,9 @@ static __global__ void gpu_initialize_qtb_history(
     gpurandState state = states[n];
     const int offset = n * nfreq2;
     for (int m = 0; m < nfreq2; ++m) {
-      random_array_0[offset + m] = draw_qtb_white_noise(&state, use_legacy_scheme);
-      random_array_1[offset + m] = draw_qtb_white_noise(&state, use_legacy_scheme);
-      random_array_2[offset + m] = draw_qtb_white_noise(&state, use_legacy_scheme);
+      random_array_0[offset + m] = draw_qtb_white_noise(&state);
+      random_array_1[offset + m] = draw_qtb_white_noise(&state);
+      random_array_2[offset + m] = draw_qtb_white_noise(&state);
     }
     states[n] = state;
   }
@@ -351,12 +343,10 @@ static __global__ void gpu_refresh_qtb_random_force(
   const int N,
   const int nfreq2,
   const bool shift_history,
-  const bool use_legacy_scheme,
   const int time_filter_count,
   const int* atom_type,
   const double* time_H,
   const double* mass,
-  const double force_prefactor,
   double* random_array_0,
   double* random_array_1,
   double* random_array_2,
@@ -376,9 +366,9 @@ static __global__ void gpu_refresh_qtb_random_force(
         random_array_1[offset + m] = random_array_1[offset + m + 1];
         random_array_2[offset + m] = random_array_2[offset + m + 1];
       }
-      random_array_0[offset + nfreq2 - 1] = draw_qtb_white_noise(&state, use_legacy_scheme);
-      random_array_1[offset + nfreq2 - 1] = draw_qtb_white_noise(&state, use_legacy_scheme);
-      random_array_2[offset + nfreq2 - 1] = draw_qtb_white_noise(&state, use_legacy_scheme);
+      random_array_0[offset + nfreq2 - 1] = draw_qtb_white_noise(&state);
+      random_array_1[offset + nfreq2 - 1] = draw_qtb_white_noise(&state);
+      random_array_2[offset + nfreq2 - 1] = draw_qtb_white_noise(&state);
     }
 
     double sum_x = 0.0;
@@ -393,203 +383,12 @@ static __global__ void gpu_refresh_qtb_random_force(
     }
 
     const double sqrt_mass = sqrt(mass[n]);
-    const double scale = force_prefactor * sqrt_mass;
+    const double scale = sqrt_mass;
     fran_x[n] = sum_x * scale;
     fran_y[n] = sum_y * scale;
     fran_z[n] = sum_z * scale;
 
     states[n] = state;
-  }
-}
-
-__device__ double device_qtb_force_sum[3];
-__device__ double device_qtb_debug_sum[8];
-
-static __global__ void gpu_find_legacy_qtb_force_sum(
-  const int N,
-  const int fixed_group,
-  const int move_group,
-  const int* group_id,
-  const double fric_coef,
-  const double* mass,
-  const double* fran_x,
-  const double* fran_y,
-  const double* fran_z,
-  const double* vx,
-  const double* vy,
-  const double* vz)
-{
-  const int tid = threadIdx.x;
-  const int bid = blockIdx.x;
-  const int number_of_rounds = (N - 1) / 1024 + 1;
-  __shared__ double s_force[1024];
-  double force_component = 0.0;
-
-  switch (bid) {
-    case 0:
-      for (int round = 0; round < number_of_rounds; ++round) {
-        const int n = tid + round * 1024;
-        if (n < N && (fixed_group < 0 || (group_id[n] != fixed_group && group_id[n] != move_group))) {
-          force_component += fran_x[n] - fric_coef * mass[n] * vx[n];
-        }
-      }
-      break;
-    case 1:
-      for (int round = 0; round < number_of_rounds; ++round) {
-        const int n = tid + round * 1024;
-        if (n < N && (fixed_group < 0 || (group_id[n] != fixed_group && group_id[n] != move_group))) {
-          force_component += fran_y[n] - fric_coef * mass[n] * vy[n];
-        }
-      }
-      break;
-    case 2:
-      for (int round = 0; round < number_of_rounds; ++round) {
-        const int n = tid + round * 1024;
-        if (n < N && (fixed_group < 0 || (group_id[n] != fixed_group && group_id[n] != move_group))) {
-          force_component += fran_z[n] - fric_coef * mass[n] * vz[n];
-        }
-      }
-      break;
-  }
-
-  s_force[tid] = force_component;
-  __syncthreads();
-
-  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-    if (tid < offset) {
-      s_force[tid] += s_force[tid + offset];
-    }
-    __syncthreads();
-  }
-
-  if (tid == 0) {
-    device_qtb_force_sum[bid] = s_force[0];
-  }
-}
-
-static __global__ void gpu_apply_legacy_qtb_force(
-  const int N,
-  const int fixed_group,
-  const int move_group,
-  const int* group_id,
-  const double fric_coef,
-  const double inverse_total_atoms,
-  const double* mass,
-  const double* fran_x,
-  const double* fran_y,
-  const double* fran_z,
-  const double* vx,
-  const double* vy,
-  const double* vz,
-  double* fx,
-  double* fy,
-  double* fz)
-{
-  const int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n < N) {
-    const double mean_fx = device_qtb_force_sum[0] * inverse_total_atoms;
-    const double mean_fy = device_qtb_force_sum[1] * inverse_total_atoms;
-    const double mean_fz = device_qtb_force_sum[2] * inverse_total_atoms;
-
-    fx[n] -= mean_fx;
-    fy[n] -= mean_fy;
-    fz[n] -= mean_fz;
-
-    if (fixed_group >= 0 && (group_id[n] == fixed_group || group_id[n] == move_group)) {
-      return;
-    }
-
-    fx[n] += fran_x[n] - fric_coef * mass[n] * vx[n];
-    fy[n] += fran_y[n] - fric_coef * mass[n] * vy[n];
-    fz[n] += fran_z[n] - fric_coef * mass[n] * vz[n];
-  }
-}
-
-static __global__ void gpu_find_legacy_qtb_debug_sum(
-  const int N,
-  const int fixed_group,
-  const int move_group,
-  const int* group_id,
-  const double fric_coef,
-  const double* mass,
-  const double* fran_x,
-  const double* fran_y,
-  const double* fran_z,
-  const double* vx,
-  const double* vy,
-  const double* vz,
-  const double* fx,
-  const double* fy,
-  const double* fz)
-{
-  const int tid = threadIdx.x;
-  const int bid = blockIdx.x;
-  const int number_of_rounds = (N - 1) / 1024 + 1;
-  __shared__ double s_value[1024];
-  double value = 0.0;
-
-  for (int round = 0; round < number_of_rounds; ++round) {
-    const int n = tid + round * 1024;
-    if (n >= N) {
-      continue;
-    }
-    if (fixed_group >= 0 && (group_id[n] == fixed_group || group_id[n] == move_group)) {
-      continue;
-    }
-
-    const double random_x = fran_x[n];
-    const double random_y = fran_y[n];
-    const double random_z = fran_z[n];
-    const double friction_x = fric_coef * mass[n] * vx[n];
-    const double friction_y = fric_coef * mass[n] * vy[n];
-    const double friction_z = fric_coef * mass[n] * vz[n];
-    const double qtb_x = random_x - friction_x;
-    const double qtb_y = random_y - friction_y;
-    const double qtb_z = random_z - friction_z;
-    const double physical_x = fx[n];
-    const double physical_y = fy[n];
-    const double physical_z = fz[n];
-
-    switch (bid) {
-      case 0:
-        value += random_x * random_x + random_y * random_y + random_z * random_z;
-        break;
-      case 1:
-        value += friction_x * friction_x + friction_y * friction_y + friction_z * friction_z;
-        break;
-      case 2:
-        value += qtb_x * qtb_x + qtb_y * qtb_y + qtb_z * qtb_z;
-        break;
-      case 3:
-        value += physical_x * physical_x + physical_y * physical_y + physical_z * physical_z;
-        break;
-      case 4:
-        value += mass[n] * (vx[n] * vx[n] + vy[n] * vy[n] + vz[n] * vz[n]);
-        break;
-      case 5:
-        value += qtb_x * vx[n] + qtb_y * vy[n] + qtb_z * vz[n];
-        break;
-      case 6:
-        value += random_x * vx[n] + random_y * vy[n] + random_z * vz[n];
-        break;
-      case 7:
-        value += friction_x * vx[n] + friction_y * vy[n] + friction_z * vz[n];
-        break;
-    }
-  }
-
-  s_value[tid] = value;
-  __syncthreads();
-
-  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
-    if (tid < offset) {
-      s_value[tid] += s_value[tid + offset];
-    }
-    __syncthreads();
-  }
-
-  if (tid == 0) {
-    device_qtb_debug_sum[bid] = s_value[0];
   }
 }
 
@@ -848,10 +647,6 @@ void Ensemble_QTB::init_qtb_common(
   int N_f_input,
   bool use_adaptive_qtb_input,
   bool use_theta_correction_input,
-  bool use_legacy_scheme_input,
-  bool enforce_cutoff_input,
-  double cutoff_taper_input,
-  int adaptive_optimizer_input,
   double adaptive_rate_input,
   double adaptive_tau_average_input,
   double adaptive_tau_adapt_input,
@@ -904,22 +699,15 @@ void Ensemble_QTB::init_qtb_common(
   adaptive_smooth_width = adaptive_smooth_width_input;
   adaptive_gamma_min = 0.01 * fric_coef;
   adaptive_gamma_max = 20.0 * fric_coef;
-  legacy_force_prefactor = sqrt(24.0 * fric_coef / h_timestep);
   use_adaptive_qtb = use_adaptive_qtb_input;
   use_theta_correction = use_theta_correction_input;
-  use_legacy_scheme = use_legacy_scheme_input;
-  enforce_cutoff = enforce_cutoff_input;
-  adaptive_optimizer = adaptive_optimizer_input;
-  cutoff_taper = cutoff_taper_input;
   filter_is_dirty = true;
   adaptive_qtb_initialized = false;
   adaptive_fft_plan_initialized = false;
   adaptive_gamma_floor_warning_issued = false;
-  legacy_fran_ready = false;
   adaptive_gamma_file = nullptr;
   adaptive_fdt_file = nullptr;
   adaptive_theta_file = nullptr;
-  legacy_debug_file = nullptr;
   last_theta_dump_temperature = -1.0;
   adaptive_rate_type_host = adaptive_rate_type_input;
 
@@ -933,15 +721,6 @@ void Ensemble_QTB::init_qtb_common(
   random_array_2.resize(size_t(number_of_atoms) * size_t(nfreq2));
   fran.resize(size_t(number_of_atoms) * 3);
 
-  if (use_legacy_scheme && std::getenv("GPUMD_QTB_LEGACY_DEBUG") != nullptr) {
-    legacy_debug_file = my_fopen("qtb_legacy_debug.out", "w");
-    fprintf(
-      legacy_debug_file,
-      "# step time_ps counter_mu random_rms_eVA friction_rms_eVA qtb_rms_eVA "
-      "physical_rms_eVA temperature_K qtb_power_eVA2_per_t random_power friction_power\n");
-    fflush(legacy_debug_file);
-  }
-
   curand_states.resize(number_of_atoms);
   initialize_curand_states<<<(number_of_atoms - 1) / 128 + 1, 128>>>(
     curand_states.data(), number_of_atoms, rand());
@@ -951,7 +730,6 @@ void Ensemble_QTB::init_qtb_common(
     curand_states.data(),
     number_of_atoms,
     nfreq2,
-    use_legacy_scheme,
     random_array_0.data(),
     random_array_1.data(),
     random_array_2.data());
@@ -969,10 +747,6 @@ Ensemble_QTB::Ensemble_QTB(
   int N_f_input,
   bool use_adaptive_qtb_input,
   bool use_theta_correction_input,
-  bool use_legacy_scheme_input,
-  bool enforce_cutoff_input,
-  double cutoff_taper_input,
-  int adaptive_optimizer_input,
   double adaptive_rate_input,
   double adaptive_tau_average_input,
   double adaptive_tau_adapt_input,
@@ -991,10 +765,6 @@ Ensemble_QTB::Ensemble_QTB(
     N_f_input,
     use_adaptive_qtb_input,
     use_theta_correction_input,
-    use_legacy_scheme_input,
-    enforce_cutoff_input,
-    cutoff_taper_input,
-    adaptive_optimizer_input,
     adaptive_rate_input,
     adaptive_tau_average_input,
     adaptive_tau_adapt_input,
@@ -1016,9 +786,6 @@ Ensemble_QTB::~Ensemble_QTB(void)
   }
   if (adaptive_theta_file) {
     fclose(adaptive_theta_file);
-  }
-  if (legacy_debug_file) {
-    fclose(legacy_debug_file);
   }
   if (adaptive_fft_plan_initialized) {
     gpufftDestroy(adaptive_fft_plan);
@@ -1320,30 +1087,9 @@ void Ensemble_QTB::update_time_filter(const double target_temperature)
       const double omega_abs = positive_index * PI / (N_f * h_timestep);
       const double theta_k =
         use_theta_correction ? corrected_theta[positive_index] : raw_theta[positive_index];
-      double omega_h_k = 0.0;
-      if (use_legacy_scheme) {
-        const double gamma_ratio = fric_coef > 0.0 ? gamma_k / fric_coef : 1.0;
-        omega_h_k = sqrt(fmax(0.0, theta_k * gamma_ratio));
-      } else {
-        const double g_k = get_ou_spectrum_correction(omega_abs, fric_coef, h_timestep);
-        const double prefactor = 24.0 * gamma_k * theta_k * g_k / h_timestep;
-        omega_h_k = sqrt(fmax(0.0, prefactor));
-      }
-
-      if (enforce_cutoff) {
-        const double omega_cut = 2.0 * PI * f_max_natural;
-        double cutoff_weight = 1.0;
-        if (omega_abs >= omega_cut) {
-          cutoff_weight = 0.0;
-        } else if (cutoff_taper > 0.0) {
-          const double taper_start = (1.0 - cutoff_taper) * omega_cut;
-          if (omega_abs > taper_start) {
-            const double x = (omega_abs - taper_start) / (omega_cut - taper_start);
-            cutoff_weight = 0.5 * (1.0 + cos(PI * x));
-          }
-        }
-        omega_h_k *= cutoff_weight;
-      }
+      const double g_k = get_ou_spectrum_correction(omega_abs, fric_coef, h_timestep);
+      const double prefactor = 24.0 * gamma_k * theta_k * g_k / h_timestep;
+      double omega_h_k = sqrt(fmax(0.0, prefactor));
 
       if (k == N_f) {
         omega_H[k] = omega_h_k;
@@ -1436,14 +1182,6 @@ void Ensemble_QTB::adapt_random_force_spectrum()
   const int num_sums = number_of_atom_types * adaptive_segment_length;
   int clamped_gamma_bins = 0;
   bool gamma_changed = false;
-  const auto is_adaptive_frequency_active = [this](const int k) {
-    if (!enforce_cutoff) {
-      return true;
-    }
-    const double frequency = double(k) / (double(nfreq2) * h_timestep);
-    return frequency < f_max_natural;
-  };
-
   gpu_zero_qtb_spectrum_sums<<<(num_sums - 1) / 128 + 1, 128>>>(
     num_sums, adaptive_vv_sums.data(), adaptive_vr_sums.data(), adaptive_ff_sums.data());
   GPU_CHECK_KERNEL
@@ -1503,7 +1241,7 @@ void Ensemble_QTB::adapt_random_force_spectrum()
       adaptive_vr_host[type_offset + k] = adaptive_vr_raw_host[type_offset + k];
     }
 
-    if (adaptive_optimizer == 1 && adaptive_smooth_width > 0.0) {
+    if (adaptive_smooth_width > 0.0) {
       const double frequency_conversion = 1000.0 / TIME_UNIT_CONVERSION;
       const double frequency_spacing = frequency_conversion / (nfreq2 * h_timestep);
       const double smooth_width_bins =
@@ -1514,33 +1252,28 @@ void Ensemble_QTB::adapt_random_force_spectrum()
 
     double average_bias_correction = 1.0;
     double elapsed_average_time = segment_time;
-    if (adaptive_optimizer == 1) {
-      const double average_decay =
-        adaptive_tau_average > 0.0 ? exp(-segment_time / adaptive_tau_average) : 0.0;
-      const int average_count = ++adaptive_average_count_host[type];
-      elapsed_average_time = average_count * segment_time;
-      average_bias_correction =
-        adaptive_tau_average > 0.0 ? 1.0 - pow(average_decay, average_count) : 1.0;
-      if (average_bias_correction < 1.0e-12) {
-        average_bias_correction = 1.0;
-      }
-      for (int k = 0; k <= N_f; ++k) {
-        const int index = type_offset + k;
-        adaptive_vv_average_host[index] =
-          average_decay * adaptive_vv_average_host[index] +
-          (1.0 - average_decay) * adaptive_vv_host[index];
-        adaptive_vr_average_host[index] =
-          average_decay * adaptive_vr_average_host[index] +
-          (1.0 - average_decay) * adaptive_vr_host[index];
-        adaptive_vv_host[index] = adaptive_vv_average_host[index] / average_bias_correction;
-        adaptive_vr_host[index] = adaptive_vr_average_host[index] / average_bias_correction;
-      }
+    const double average_decay =
+      adaptive_tau_average > 0.0 ? exp(-segment_time / adaptive_tau_average) : 0.0;
+    const int average_count = ++adaptive_average_count_host[type];
+    elapsed_average_time = average_count * segment_time;
+    average_bias_correction =
+      adaptive_tau_average > 0.0 ? 1.0 - pow(average_decay, average_count) : 1.0;
+    if (average_bias_correction < 1.0e-12) {
+      average_bias_correction = 1.0;
+    }
+    for (int k = 0; k <= N_f; ++k) {
+      const int index = type_offset + k;
+      adaptive_vv_average_host[index] =
+        average_decay * adaptive_vv_average_host[index] +
+        (1.0 - average_decay) * adaptive_vv_host[index];
+      adaptive_vr_average_host[index] =
+        average_decay * adaptive_vr_average_host[index] +
+        (1.0 - average_decay) * adaptive_vr_host[index];
+      adaptive_vv_host[index] = adaptive_vv_average_host[index] / average_bias_correction;
+      adaptive_vr_host[index] = adaptive_vr_average_host[index] / average_bias_correction;
     }
 
     for (int k = 1; k <= N_f; ++k) {
-      if (!is_adaptive_frequency_active(k)) {
-        continue;
-      }
       const int gamma_index = type_offset + get_gamma_index_from_fft_bin(N_f, k);
       const double gamma_k = gamma_spectrum_host[gamma_index];
       const double delta_fdt_k =
@@ -1550,50 +1283,31 @@ void Ensemble_QTB::adapt_random_force_spectrum()
       delta_norm_sq += delta_fdt_k * delta_fdt_k;
     }
 
-    const double delta_norm = sqrt(delta_norm_sq);
-    if (delta_norm < 1.0e-30 && adaptive_optimizer == 0) {
-      continue;
-    }
-
     for (int k = 1; k <= N_f; ++k) {
-      if (!is_adaptive_frequency_active(k)) {
-        continue;
-      }
       const int gamma_index = type_offset + get_gamma_index_from_fft_bin(N_f, k);
       const double adaptive_rate_type = adaptive_rate_type_host[type];
       const double gamma_old = gamma_spectrum_host[gamma_index];
       double gamma_new = gamma_old;
-      if (adaptive_optimizer == 1) {
-        const double vv = adaptive_vv_host[type_offset + k];
-        if (vv > 1.0e-30) {
-          const double gamma_target = adaptive_vr_host[type_offset + k] / vv;
-          if (std::isfinite(gamma_target)) {
-            const double blend = fmax(0.0, fmin(1.0, adaptive_rate_type));
-            double gamma_candidate = gamma_target;
-            if (adaptive_tau_average > 0.0 && elapsed_average_time < adaptive_tau_average) {
-              const double warmup = elapsed_average_time / adaptive_tau_average;
-              gamma_candidate =
-                warmup * gamma_target + (1.0 - warmup) * gamma_initial_spectrum_host[gamma_index];
-            }
-            gamma_new = (1.0 - blend) * gamma_old + blend * gamma_candidate;
-            if (adaptive_tau_adapt > 0.0 && elapsed_average_time >= adaptive_tau_average) {
-              const double gamma_decay = exp(-segment_time / adaptive_tau_adapt);
-              adaptive_gamma_running_host[gamma_index] =
-                gamma_decay * adaptive_gamma_running_host[gamma_index] +
-                (1.0 - gamma_decay) * gamma_new;
-              gamma_new = adaptive_gamma_running_host[gamma_index];
-            }
+      const double vv = adaptive_vv_host[type_offset + k];
+      if (vv > 1.0e-30) {
+        const double gamma_target = adaptive_vr_host[type_offset + k] / vv;
+        if (std::isfinite(gamma_target)) {
+          const double blend = fmax(0.0, fmin(1.0, adaptive_rate_type));
+          double gamma_candidate = gamma_target;
+          if (adaptive_tau_average > 0.0 && elapsed_average_time < adaptive_tau_average) {
+            const double warmup = elapsed_average_time / adaptive_tau_average;
+            gamma_candidate =
+              warmup * gamma_target + (1.0 - warmup) * gamma_initial_spectrum_host[gamma_index];
+          }
+          gamma_new = (1.0 - blend) * gamma_old + blend * gamma_candidate;
+          if (adaptive_tau_adapt > 0.0 && elapsed_average_time >= adaptive_tau_average) {
+            const double gamma_decay = exp(-segment_time / adaptive_tau_adapt);
+            adaptive_gamma_running_host[gamma_index] =
+              gamma_decay * adaptive_gamma_running_host[gamma_index] +
+              (1.0 - gamma_decay) * gamma_new;
+            gamma_new = adaptive_gamma_running_host[gamma_index];
           }
         }
-      } else {
-        // The simple adaptive update uses the normalized FDT residual.
-        // delta_fdt stores gamma_r * mCvv - Re[CvF], so a positive residual
-        // decreases gamma_r and a negative residual increases it. The
-        // user-facing adapt_rate is a dimensionless per-segment step, scaled
-        // here by the fixed dissipative friction.
-        gamma_new =
-          gamma_old -
-          adaptive_rate_type * fric_coef * delta_fdt[k] / delta_norm;
       }
       const double gamma_clamped =
         fmax(adaptive_gamma_min, fmin(adaptive_gamma_max, gamma_new));
@@ -1642,12 +1356,10 @@ void Ensemble_QTB::refresh_colored_random_force(const bool shift_history)
     number_of_atoms,
     nfreq2,
     shift_history,
-    use_legacy_scheme,
     time_filter_count,
     atom->type.data(),
     time_H_device.data(),
     atom->mass.data(),
-    use_legacy_scheme ? legacy_force_prefactor : 1.0,
     random_array_0.data(),
     random_array_1.data(),
     random_array_2.data(),
@@ -1655,96 +1367,6 @@ void Ensemble_QTB::refresh_colored_random_force(const bool shift_history)
     fran.data() + number_of_atoms,
     fran.data() + number_of_atoms * 2);
   GPU_CHECK_KERNEL
-}
-
-void Ensemble_QTB::apply_legacy_qtb_force(const std::vector<Group>& group)
-{
-  gpu_find_legacy_qtb_force_sum<<<3, 1024>>>(
-    number_of_atoms,
-    fixed_group,
-    move_group,
-    fixed_group == -1 ? nullptr : group[fixed_grouping_method].label.data(),
-    fric_coef,
-    atom->mass.data(),
-    fran.data(),
-    fran.data() + number_of_atoms,
-    fran.data() + 2 * number_of_atoms,
-    atom->velocity_per_atom.data(),
-    atom->velocity_per_atom.data() + number_of_atoms,
-    atom->velocity_per_atom.data() + 2 * number_of_atoms);
-  GPU_CHECK_KERNEL
-
-  gpu_apply_legacy_qtb_force<<<(number_of_atoms - 1) / 128 + 1, 128>>>(
-    number_of_atoms,
-    fixed_group,
-    move_group,
-    fixed_group == -1 ? nullptr : group[fixed_grouping_method].label.data(),
-    fric_coef,
-    1.0 / number_of_atoms,
-    atom->mass.data(),
-    fran.data(),
-    fran.data() + number_of_atoms,
-    fran.data() + 2 * number_of_atoms,
-    atom->velocity_per_atom.data(),
-    atom->velocity_per_atom.data() + number_of_atoms,
-    atom->velocity_per_atom.data() + 2 * number_of_atoms,
-    atom->force_per_atom.data(),
-    atom->force_per_atom.data() + number_of_atoms,
-    atom->force_per_atom.data() + 2 * number_of_atoms);
-  GPU_CHECK_KERNEL
-}
-
-void Ensemble_QTB::write_legacy_qtb_debug(const std::vector<Group>& group)
-{
-  if (!legacy_debug_file) {
-    return;
-  }
-
-  gpu_find_legacy_qtb_debug_sum<<<8, 1024>>>(
-    number_of_atoms,
-    fixed_group,
-    move_group,
-    fixed_group == -1 ? nullptr : group[fixed_grouping_method].label.data(),
-    fric_coef,
-    atom->mass.data(),
-    fran.data(),
-    fran.data() + number_of_atoms,
-    fran.data() + 2 * number_of_atoms,
-    atom->velocity_per_atom.data(),
-    atom->velocity_per_atom.data() + number_of_atoms,
-    atom->velocity_per_atom.data() + 2 * number_of_atoms,
-    atom->force_per_atom.data(),
-    atom->force_per_atom.data() + number_of_atoms,
-    atom->force_per_atom.data() + 2 * number_of_atoms);
-  GPU_CHECK_KERNEL
-
-  double debug_sum[8];
-  CHECK(gpuMemcpyFromSymbol(
-    debug_sum, device_qtb_debug_sum, sizeof(double) * 8, 0, gpuMemcpyDeviceToHost));
-
-  const double dof = 3.0 * number_of_atoms;
-  const double random_rms = sqrt(fmax(0.0, debug_sum[0] / dof));
-  const double friction_rms = sqrt(fmax(0.0, debug_sum[1] / dof));
-  const double qtb_rms = sqrt(fmax(0.0, debug_sum[2] / dof));
-  const double physical_rms = sqrt(fmax(0.0, debug_sum[3] / dof));
-  const double temperature_inst = debug_sum[4] / (dof * K_B);
-  const double time_ps = (*current_step_absolute) * dt * TIME_UNIT_CONVERSION / 1000.0;
-
-  fprintf(
-    legacy_debug_file,
-    "%d %.8f %d %.8e %.8e %.8e %.8e %.8e %.8e %.8e %.8e\n",
-    *current_step_absolute,
-    time_ps,
-    counter_mu,
-    random_rms,
-    friction_rms,
-    qtb_rms,
-    physical_rms,
-    temperature_inst,
-    debug_sum[5] / dof,
-    debug_sum[6] / dof,
-    debug_sum[7] / dof);
-  fflush(legacy_debug_file);
 }
 
 void Ensemble_QTB::apply_qtb_force_half_step(const std::vector<Group>& group)
@@ -1865,26 +1487,6 @@ void Ensemble_QTB::compute1(
     initialize_adaptive_qtb();
   }
 
-  if (use_legacy_scheme) {
-    if (!legacy_fran_ready) {
-      update_time_filter(temperature);
-      refresh_colored_random_force(false);
-      apply_legacy_qtb_force(group);
-      legacy_fran_ready = true;
-      counter_mu = 1;
-    }
-
-    velocity_verlet(
-      true,
-      time_step,
-      group,
-      atom.mass,
-      atom.force_per_atom,
-      atom.position_per_atom,
-      atom.velocity_per_atom);
-    return;
-  }
-
   // B: force half-step on velocities
   apply_qtb_force_half_step(group);
 
@@ -1912,46 +1514,6 @@ void Ensemble_QTB::compute2(
   Atom& atom,
   GPU_Vector<double>& thermo)
 {
-  if (use_legacy_scheme) {
-    if (counter_mu == alpha) {
-      update_time_filter(temperature);
-      refresh_colored_random_force(true);
-      counter_mu = 0;
-    }
-
-    write_legacy_qtb_debug(group);
-    apply_legacy_qtb_force(group);
-
-    if (use_adaptive_qtb) {
-      // Match the 2019 adQTB-r segment definition: one velocity/random-force
-      // sample per MD step, even though the colored force is refreshed only
-      // every alpha steps.
-      sample_adaptive_qtb();
-    }
-
-    velocity_verlet(
-      false,
-      time_step,
-      group,
-      atom.mass,
-      atom.force_per_atom,
-      atom.position_per_atom,
-      atom.velocity_per_atom);
-
-    find_thermo(
-      true,
-      box.get_volume(),
-      group,
-      atom.mass,
-      atom.potential_per_atom,
-      atom.velocity_per_atom,
-      atom.virial_per_atom,
-      thermo);
-
-    counter_mu++;
-    return;
-  }
-
   // B: force half-step on velocities
   apply_qtb_force_half_step(group);
 

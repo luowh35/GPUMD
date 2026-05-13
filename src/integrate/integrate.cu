@@ -142,10 +142,6 @@ void Integrate::initialize(
           qtb_n_f,
           qtb_use_adaptive,
           qtb_use_theta_correction,
-          qtb_use_legacy_scheme,
-          qtb_enforce_cutoff,
-          qtb_cutoff_taper,
-          qtb_adaptive_optimizer,
           qtb_adaptive_rate,
           qtb_adaptive_tau_average,
           qtb_adaptive_tau_adapt,
@@ -441,10 +437,6 @@ void Integrate::parse_ensemble(
   qtb_n_f = 100;
   qtb_use_adaptive = false;
   qtb_use_theta_correction = true;
-  qtb_use_legacy_scheme = false;
-  qtb_enforce_cutoff = false;
-  qtb_adaptive_optimizer = 1;
-  qtb_cutoff_taper = 0.0;
   qtb_adaptive_rate = 0.1;
   qtb_adaptive_tau_average = -1.0;
   qtb_adaptive_tau_adapt = 0.0;
@@ -1062,18 +1054,16 @@ void Integrate::parse_ensemble(
         if (qtb_adaptive_window > 0.0) {
           printf("    adapt_window is %g time_step.\n", qtb_adaptive_window);
         }
-        if (qtb_adaptive_optimizer == 1) {
-          if (qtb_adaptive_tau_average > 0.0) {
-            printf("    adapt_tau_avg is %g time_step.\n", qtb_adaptive_tau_average);
-          } else {
-            printf("    adapt_tau_avg defaults to 10 adaptive segments.\n");
-          }
-          if (qtb_adaptive_tau_adapt > 0.0) {
-            printf("    adapt_tau_adapt is %g time_step.\n", qtb_adaptive_tau_adapt);
-          }
-          if (qtb_adaptive_smooth_width > 0.0) {
-            printf("    adapt_smooth is %g ps^-1.\n", qtb_adaptive_smooth_width);
-          }
+        if (qtb_adaptive_tau_average > 0.0) {
+          printf("    adapt_tau_avg is %g time_step.\n", qtb_adaptive_tau_average);
+        } else {
+          printf("    adapt_tau_avg defaults to 10 adaptive segments.\n");
+        }
+        if (qtb_adaptive_tau_adapt > 0.0) {
+          printf("    adapt_tau_adapt is %g time_step.\n", qtb_adaptive_tau_adapt);
+        }
+        if (qtb_adaptive_smooth_width > 0.0) {
+          printf("    adapt_smooth is %g ps^-1.\n", qtb_adaptive_smooth_width);
         }
         for (int type_id = 0; type_id < int(qtb_adaptive_rate_type.size()); ++type_id) {
           if (qtb_adaptive_rate_type[type_id] > 0.0) {

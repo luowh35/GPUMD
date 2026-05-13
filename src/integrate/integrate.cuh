@@ -90,10 +90,6 @@ public:
   int qtb_n_f = 100;
   bool qtb_use_adaptive = false;
   bool qtb_use_theta_correction = true;
-  bool qtb_use_legacy_scheme = false;
-  bool qtb_enforce_cutoff = false;
-  int qtb_adaptive_optimizer = 1; // 0=simple, 1=ratio
-  double qtb_cutoff_taper = 0.0;
   double qtb_adaptive_rate = 0.1;
   double qtb_adaptive_tau_average = -1.0;
   double qtb_adaptive_tau_adapt = 0.0;

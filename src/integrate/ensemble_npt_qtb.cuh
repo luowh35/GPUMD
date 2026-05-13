@@ -61,7 +61,6 @@ private:
   int qtb_time_filter_count;
   int qtb_adaptive_sample_count;
   int qtb_adaptive_update_count;
-  int qtb_adaptive_optimizer;
 
   double qtb_dt;
   double qtb_h_timestep;
